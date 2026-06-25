@@ -1,0 +1,13 @@
+{
+  "name": "projectyzer",
+  "version": "1.0.0",
+  "description": "Trazador de proyectos estilo Kanban con linea de tiempo, dominios y tareas prioritarias",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "pg": "^8.11.5"
+  }
+}

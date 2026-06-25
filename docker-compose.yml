@@ -1,0 +1,37 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: projectyzer-db
+    environment:
+      POSTGRES_USER: projectyzer
+      POSTGRES_PASSWORD: projectyzer
+      POSTGRES_DB: projectyzer
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U projectyzer -d projectyzer"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  app:
+    build: .
+    container_name: projectyzer-app
+    environment:
+      PORT: 3016
+      PGHOST: db
+      PGPORT: 5432
+      PGUSER: projectyzer
+      PGPASSWORD: projectyzer
+      PGDATABASE: projectyzer
+    ports:
+      - "3016:3016"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

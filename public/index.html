@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ProjecTyzer — Trazador de proyectos</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">📐 ProjecTyzer</div>
+  <div class="zoom">
+    <span class="zoom-label">Escala:</span>
+    <button data-zoom="day">Día</button>
+    <button data-zoom="week" class="active">Semana</button>
+    <button data-zoom="month">Mes</button>
+    <button data-zoom="quarter">Q</button>
+    <button data-zoom="semester">H</button>
+    <button data-zoom="year">Año</button>
+  </div>
+  <div class="actions">
+    <button id="btnNew" class="btn btn-primary">+ Proyecto</button>
+    <button id="btnPriority" class="btn btn-danger">⚡ Prioritaria</button>
+    <button id="btnLegend" class="btn btn-ghost" title="Leyenda">ⓘ Leyenda</button>
+    <button id="btnDomains" class="btn">⚙ Dominios</button>
+    <button id="btnReport" class="btn">📊 Reportería</button>
+    <button id="btnExport" class="btn btn-ghost">⬇ Exportar</button>
+  </div>
+</header>
+
+<main class="layout">
+  <aside class="backlog" id="backlog">
+    <h2>Backlog</h2>
+    <div class="backlog-list" id="backlogList"></div>
+    <p class="hint">Arrastra una tarjeta a un dominio para iniciarla.</p>
+  </aside>
+
+  <section class="board" id="board">
+    <div class="board-inner" id="boardInner">
+      <div class="corner">Dominios</div>
+      <div class="axis" id="axis"></div>
+      <div class="rail" id="rail"></div>
+      <div class="canvas" id="canvas"></div>
+    </div>
+  </section>
+</main>
+
+<section class="summary" id="summary">
+  <div class="summary-head">
+    <h2>Proyectos <span class="count" id="summaryCount"></span></h2>
+    <div class="summary-filters" id="summaryFilters">
+      <button data-st="backlog" class="active">Backlog</button>
+      <button data-st="doing" class="active">Doing</button>
+      <button data-st="ended">Ended</button>
+    </div>
+    <button id="summaryToggle" class="btn btn-ghost btn-sm">▾</button>
+  </div>
+  <div class="summary-body" id="summaryBody"></div>
+</section>
+
+<!-- Modal proyecto / prioritaria -->
+<div class="modal-bg" id="modal" hidden>
+  <div class="modal">
+    <h3 id="modalTitle">Nuevo proyecto</h3>
+    <form id="taskForm">
+      <input type="hidden" id="f_id">
+      <input type="hidden" id="f_priority" value="false">
+      <label>Nombre <input id="f_name" required></label>
+      <label>Dueño <input id="f_owner"></label>
+      <label>Descripción corta <input id="f_desc" maxlength="140"></label>
+      <div class="row">
+        <label>Dominio
+          <select id="f_domain"></select>
+        </label>
+        <label>Alcance (semanas)
+          <input id="f_scope" type="number" min="0.5" step="0.5" value="2">
+        </label>
+      </div>
+      <div class="row">
+        <label>Inicio <input id="f_start" type="date"></label>
+        <label>Estado
+          <select id="f_status">
+            <option value="backlog">Backlog</option>
+            <option value="doing">Doing</option>
+            <option value="ended">Ended</option>
+          </select>
+        </label>
+      </div>
+      <div id="colorRow" class="color-row"></div>
+
+      <div class="subs" id="subsWrap">
+        <h4>Subrutinas en otros dominios <small>(dependencias)</small></h4>
+        <div id="subsList"></div>
+        <button type="button" class="btn btn-ghost btn-sm" id="addSub">+ Subrutina</button>
+      </div>
+
+      <div class="modal-foot">
+        <button type="button" class="btn btn-ghost" id="btnDelete" hidden>Eliminar</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn" id="btnCancel">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal reportería -->
+<div class="modal-bg" id="reportModal" hidden>
+  <div class="modal modal-wide">
+    <h3>📊 Reportería de desviación</h3>
+    <div id="reportBody"></div>
+    <div class="modal-foot">
+      <span class="spacer"></span>
+      <button type="button" class="btn btn-primary" id="closeReport">Cerrar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Leyenda -->
+<div id="legend" class="legend" hidden>
+  <h4>Leyenda</h4>
+  <div class="lg"><span class="sw" style="background:linear-gradient(135deg,#ef4444,#b91c1c)"></span> Prioritaria — corta el trabajo</div>
+  <div class="lg"><span class="sw sw-cont"></span> Tramo que continúa tras la pausa ⏸</div>
+  <div class="lg"><span class="sw sw-sub"></span> Subrutina (dependencia)</div>
+  <div class="lg"><span class="sw sw-end"></span> Finalizada</div>
+  <div class="lg"><span class="sw sw-chip">AB</span> Iniciales del dueño</div>
+  <div class="lg"><span class="sw sw-dev">+d</span> Días de desviación</div>
+  <div class="lg"><span class="sw sw-today"></span> Línea HOY</div>
+  <div class="lg"><span class="sw sw-wknd"></span> Fin de semana (sáb/dom)</div>
+</div>
+
+<!-- Modal dominios -->
+<div class="modal-bg" id="domainModal" hidden>
+  <div class="modal">
+    <h3>⚙ Dominios</h3>
+    <p class="hint">Renombra, cambia color, reordena o elimina. Al eliminar un dominio, sus tareas vuelven al backlog.</p>
+    <div id="domainList"></div>
+    <button type="button" class="btn btn-ghost btn-sm" id="addDomain">+ Agregar dominio</button>
+    <div class="modal-foot">
+      <span class="spacer"></span>
+      <button type="button" class="btn btn-primary" id="closeDomains">Cerrar</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

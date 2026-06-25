@@ -1,0 +1,693 @@
+'use strict';
+// =================== ProjecTyzer frontend ===================
+
+const ZOOMS = {
+  day:      { pxDay: 42,  tick: 'day' },
+  week:     { pxDay: 16,  tick: 'week' },
+  month:    { pxDay: 6,   tick: 'month' },
+  quarter:  { pxDay: 2.4, tick: 'quarter' },
+  semester: { pxDay: 1.4, tick: 'semester' },
+  year:     { pxDay: 0.8, tick: 'year' },
+};
+const PALETTE = ['#3b82f6','#8b5cf6','#22c55e','#f59e0b','#06b6d4','#ec4899',
+  '#14b8a6','#84cc16','#a855f7','#0ea5e9','#eab308','#10b981','#6366f1','#f97316','#d946ef'];
+const RED = '#ef4444';
+const ROW_H = 56;
+const DAY_MS = 86400000;
+
+const state = { domains: [], tasks: [], zoom: 'week', viewStart: null, geom: {} };
+
+const $ = (s) => document.querySelector(s);
+const api = {
+  async get(u){ return (await fetch(u)).json(); },
+  async send(u, m, b){ return (await fetch(u, {method:m, headers:{'Content-Type':'application/json'}, body: b?JSON.stringify(b):undefined})).json(); },
+};
+const iso = (d) => new Date(d).toISOString().slice(0,10);
+const today = () => { const d=new Date(); d.setHours(0,0,0,0); return d; };
+const addDays = (d,n) => { const x=new Date(d); x.setDate(x.getDate()+n); return x; };
+const dayDiff = (a,b) => Math.round((new Date(a)-new Date(b))/DAY_MS);
+
+// =================== LOAD ===================
+async function loadAll(){
+  state.domains = await api.get('/api/domains');
+  state.tasks = await api.get('/api/tasks');
+  computeViewStart();
+  renderBacklog();
+  renderBoard();
+  renderSummary();
+}
+
+// =================== RESUMEN (panel inferior) ===================
+const summaryFilter={ backlog:true, doing:true, ended:false };
+function renderSummary(){
+  const body=$('#summaryBody');
+  const items=state.tasks.filter(t=>summaryFilter[t.status]);
+  $('#summaryCount').textContent=`(${items.length})`;
+  if(!items.length){ body.innerHTML='<p class="hint" style="padding:12px 14px">No hay proyectos para los filtros seleccionados.</p>'; return; }
+  items.sort((a,b)=>(Number(b.is_priority)-Number(a.is_priority)) || (new Date(a.start_date||0)-new Date(b.start_date||0)));
+  body.innerHTML=`<table class="summary-table">
+    <thead><tr><th>Estado</th><th>Proyecto</th><th>Dueño</th><th>Dominio</th><th>Inicio</th><th>Alcance</th><th>Desviación</th></tr></thead>
+    <tbody>${items.map(t=>{
+      const dev=devDaysClient(t);
+      return `<tr data-id="${t.id}">
+        <td><span class="st st-${t.status}">${t.status}</span>${t.is_priority?'<span class="st st-pri">⚡</span>':''}</td>
+        <td>${esc(t.name)}</td>
+        <td>${esc(t.owner||'—')}</td>
+        <td>${esc(domName(t.domain_id))}</td>
+        <td>${t.start_date?iso(t.start_date):'—'}</td>
+        <td>${t.scope_weeks}s</td>
+        <td>${dev>0?`<span class="dev-pos">+${dev}d</span>`:'<span class="dev-zero">0</span>'}</td>
+      </tr>`;
+    }).join('')}</tbody></table>`;
+  body.querySelectorAll('tr[data-id]').forEach(tr=>tr.onclick=()=>{ const t=state.tasks.find(x=>x.id==tr.dataset.id); if(t) openTask(t); });
+}
+$('#summaryToggle').onclick=()=>{
+  const s=$('#summary'); s.classList.toggle('collapsed');
+  $('#summaryToggle').textContent = s.classList.contains('collapsed')?'▸':'▾';
+};
+document.querySelectorAll('#summaryFilters button').forEach(b=>{
+  b.onclick=()=>{ const st=b.dataset.st; summaryFilter[st]=!summaryFilter[st]; b.classList.toggle('active',summaryFilter[st]); renderSummary(); };
+});
+function computeViewStart(){
+  let min = today(), max = addDays(today(), 90);
+  for(const t of state.tasks){
+    if(t.start_date){
+      const s = new Date(t.start_date);
+      if(s<min) min=s;
+      const e = addDays(s, Math.ceil(t.scope_weeks*7));
+      if(e>max) max=e;
+    }
+  }
+  state.viewStart = addDays(min, -14);
+  state.viewEnd = addDays(max, 21);
+}
+const px = (date) => dayDiff(date, state.viewStart) * ZOOMS[state.zoom].pxDay;
+const widthFor = (weeks) => Math.max(34, weeks*7*ZOOMS[state.zoom].pxDay);
+
+// ----- helpers visuales -----
+function initials(name){ if(!name) return ''; return name.split(/\s+/).filter(Boolean).slice(0,2).map(w=>w[0].toUpperCase()).join(''); }
+function domName(id){ const d=state.domains.find(x=>x.id===id); return d?d.name:'—'; }
+function devDaysClient(t){
+  const base=(t.start_date&&t.baseline_start)?Math.round((new Date(t.start_date)-new Date(t.baseline_start))/DAY_MS):0;
+  return base + Number(t.priority_shift_days||0);
+}
+function progressPct(t){
+  if(t.status==='ended') return 100;
+  if(t.status!=='doing'||!t.start_date) return 0;
+  const dur=Math.max(1,Math.ceil(Number(t.scope_weeks)*7));
+  const elapsed=(today()-new Date(t.start_date))/DAY_MS;
+  return Math.max(0,Math.min(100,Math.round(elapsed/dur*100)));
+}
+
+// ----- ventanas de tareas prioritarias (cortan/parten el trabajo) -----
+let WINDOWS = [];
+function priorityFullDays(t){
+  let m=Math.ceil(Number(t.scope_weeks)*7);
+  for(const s of (t.subtasks||[])) m=Math.max(m, Math.round(Number(s.offset_weeks)*7)+Math.ceil(Number(s.scope_weeks)*7));
+  return m;
+}
+// Cada ventana lleva el conjunto de dominios (horizontales) que la roja afecta:
+// su propio dominio + los dominios de sus subtareas. Solo esas filas se cortan.
+function priorityWindows(){
+  return state.tasks.filter(t=>t.is_priority && t.status!=='ended' && t.start_date)
+    .map(t=>{
+      const s=new Date(t.start_date);
+      const domains=new Set([t.domain_id]);
+      for(const sub of (t.subtasks||[])) if(sub.domain_id) domains.add(sub.domain_id);
+      return {s, e:addDays(s, priorityFullDays(t)), domains};
+    })
+    .sort((a,b)=>a.s-b.s);
+}
+// Divide [start, start+durNum] saltando las ventanas prioritarias -> segmentos
+function segmentize(start, durNum, windows){
+  let cursor=new Date(start); let remaining=durNum; const segs=[];
+  for(const w of windows){
+    if(w.e<=cursor) continue;
+    const curEnd=addDays(cursor, remaining);
+    if(w.s>=curEnd) break;
+    if(w.s<=cursor){ cursor=new Date(w.e); continue; }     // arranca dentro -> espera al fin
+    const before=Math.round((w.s-cursor)/DAY_MS);
+    if(before>0){ segs.push([new Date(cursor), new Date(w.s)]); remaining-=before; }
+    cursor=new Date(w.e);                                   // reanuda tras la prioritaria
+  }
+  segs.push([new Date(cursor), addDays(cursor, remaining)]);
+  return segs;
+}
+
+// =================== BACKLOG ===================
+function renderBacklog(){
+  const list = $('#backlogList'); list.innerHTML='';
+  const items = state.tasks.filter(t=>t.status==='backlog');
+  if(!items.length){ list.innerHTML='<p class="hint">Sin tareas en backlog.</p>'; }
+  for(const t of items){
+    const dom = state.domains.find(d=>d.id===t.domain_id);
+    const el = document.createElement('div');
+    el.className='bcard'; el.draggable=true; el.style.borderLeftColor=t.color;
+    el.innerHTML=`<div class="bt">${t.is_priority?'⚡ ':''}${esc(t.name)}</div>
+      <div class="bm">${esc(t.owner||'—')} · ${t.scope_weeks} sem${dom?(' · '+esc(dom.name)):''}</div>`;
+    el.addEventListener('dragstart', e=>{ e.dataTransfer.setData('text/plain', String(t.id)); });
+    el.addEventListener('click', ()=>openTask(t));
+    list.appendChild(el);
+  }
+}
+
+// =================== BOARD GEOMETRY ===================
+function computeGeom(){
+  WINDOWS = priorityWindows();
+  // filas de PROYECTOS por dominio
+  const projRows = {};
+  for(const d of state.domains) projRows[d.id]=1;
+  for(const t of state.tasks){
+    if(t.status==='backlog'||!t.domain_id) continue;
+    projRows[t.domain_id]=Math.max(projRows[t.domain_id]||1, (t.lane||0)+1);
+  }
+  // Empaquetar SUBRUTINAS en filas dedicadas DEBAJO de los proyectos, sin montarse.
+  // Se asigna sub-fila por empaque voraz: subrutinas que no se solapan en tiempo
+  // comparten fila; las que se solapan bajan una fila más.
+  const subItems=[];
+  for(const t of state.tasks){
+    if(t.is_priority||t.status==='backlog'||!t.domain_id||!t.start_date) continue;
+    for(const s of (t.subtasks||[])){
+      if(!s.domain_id) continue;
+      const start=addDays(new Date(t.start_date), Math.round(Number(s.offset_weeks)*7));
+      const dur=Math.ceil(Number(s.scope_weeks)*7);
+      const wins=WINDOWS.filter(w=>w.domains.has(s.domain_id));
+      const segs=segmentize(start, dur, wins);
+      subItems.push({domain:s.domain_id, start, end:segs[segs.length-1][1], key:t.id+'-'+s.id});
+    }
+  }
+  subItems.sort((a,b)=>a.start-b.start);
+  const subLanes={}, laneEnds={};
+  for(const it of subItems){
+    const lanes=laneEnds[it.domain]=laneEnds[it.domain]||[];
+    let placed=false;
+    for(let i=0;i<lanes.length;i++){ if(it.start>=lanes[i]){ lanes[i]=it.end; subLanes[it.key]=i; placed=true; break; } }
+    if(!placed){ lanes.push(it.end); subLanes[it.key]=lanes.length-1; }
+  }
+  const subRows={};
+  for(const d of state.domains) subRows[d.id]=(laneEnds[d.id]||[]).length;
+
+  let y=0; const bandTop={}, bandH={};
+  for(const d of state.domains){
+    const r=(projRows[d.id]||1)+(subRows[d.id]||0);
+    const h=r*ROW_H + 16;
+    bandTop[d.id]=y; bandH[d.id]=h; y+=h;
+  }
+  state.geom = { rows:projRows, projRows, subRows, subLanes, bandTop, bandH, totalH:y };
+}
+
+function renderBoard(){
+  computeGeom();
+  const z = ZOOMS[state.zoom];
+  const totalDays = dayDiff(state.viewEnd, state.viewStart);
+  const canvasW = Math.max(1200, totalDays*z.pxDay);
+  const inner = $('#boardInner');
+  inner.style.setProperty('--canvasW', canvasW+'px');
+  inner.style.setProperty('--canvasH', Math.max(300,state.geom.totalH)+'px');
+
+  renderAxis(canvasW);
+  renderRail();
+  renderCanvas(canvasW);
+}
+
+function renderAxis(canvasW){
+  const axis = $('#axis'); axis.innerHTML='';
+  const z = ZOOMS[state.zoom];
+  let cur = new Date(state.viewStart);
+  const end = state.viewEnd;
+  const step = z.tick;
+  const fmt = (d)=>d.toLocaleDateString('es',{day:'2-digit',month:'short'});
+
+  function tick(date, major, label, sub){
+    const x = px(date);
+    const t = document.createElement('div');
+    t.className='tick'+(major?' major':''); t.style.left=x+'px';
+    axis.appendChild(t);
+    if(label){ const l=document.createElement('div'); l.className='tick-label'; l.style.left=x+'px'; l.textContent=label; axis.appendChild(l);}
+    if(sub){ const s=document.createElement('div'); s.className='tick-sub'; s.style.left=x+'px'; s.textContent=sub; axis.appendChild(s);}
+  }
+
+  // alinear inicio
+  if(step==='week'){ while(cur.getDay()!==1) cur=addDays(cur,1); }
+  if(['month','quarter','semester','year'].includes(step)){ cur=new Date(cur.getFullYear(),cur.getMonth(),1); }
+
+  while(cur<=end){
+    if(step==='day'){
+      const major = cur.getDay()===1;
+      tick(cur, major, fmt(cur), cur.toLocaleDateString('es',{weekday:'short'}));
+      cur=addDays(cur,1);
+    } else if(step==='week'){
+      tick(cur, cur.getDate()<=7, 'Sem '+isoWeek(cur), fmt(cur));
+      cur=addDays(cur,7);
+    } else if(step==='month'){
+      tick(cur, cur.getMonth()===0, cur.toLocaleDateString('es',{month:'short',year:'2-digit'}));
+      cur=new Date(cur.getFullYear(),cur.getMonth()+1,1);
+    } else if(step==='quarter'){
+      const q=Math.floor(cur.getMonth()/3)+1;
+      if(cur.getMonth()%3===0) tick(cur, q===1, 'Q'+q+' '+(''+cur.getFullYear()).slice(2));
+      cur=new Date(cur.getFullYear(),cur.getMonth()+1,1);
+    } else if(step==='semester'){
+      if(cur.getMonth()===0||cur.getMonth()===6) tick(cur, cur.getMonth()===0, 'H'+(cur.getMonth()<6?1:2)+' '+cur.getFullYear());
+      cur=new Date(cur.getFullYear(),cur.getMonth()+1,1);
+    } else if(step==='year'){
+      if(cur.getMonth()===0) tick(cur, true, ''+cur.getFullYear());
+      cur=new Date(cur.getFullYear(),cur.getMonth()+1,1);
+    }
+  }
+}
+function isoWeek(d){ const x=new Date(d); x.setHours(0,0,0,0); x.setDate(x.getDate()+3-((x.getDay()+6)%7)); const w1=new Date(x.getFullYear(),0,4); return 1+Math.round(((x-w1)/DAY_MS-3+((w1.getDay()+6)%7))/7); }
+
+function renderRail(){
+  const rail = $('#rail'); rail.innerHTML='';
+  for(const d of state.domains){
+    const it=document.createElement('div');
+    it.className='rail-item';
+    it.style.top=state.geom.bandTop[d.id]+'px';
+    it.style.height=state.geom.bandH[d.id]+'px';
+    it.innerHTML=`<span class="rail-dot" style="background:${d.color}"></span>${esc(d.name)}`;
+    it.title='Clic para gestionar dominios';
+    it.onclick=openDomains;
+    rail.appendChild(it);
+  }
+}
+
+function renderCanvas(canvasW){
+  const c = $('#canvas'); c.innerHTML='';
+  WINDOWS = priorityWindows();
+  // bandas
+  for(const d of state.domains){
+    const b=document.createElement('div');
+    b.className='lane-band';
+    b.style.top=state.geom.bandTop[d.id]+'px';
+    b.style.height=state.geom.bandH[d.id]+'px';
+    b.dataset.domain=d.id;
+    c.appendChild(b);
+  }
+  // bandas de fin de semana (sábado y domingo) — solo en escalas finas
+  const pxDay=ZOOMS[state.zoom].pxDay;
+  if(pxDay>=8){
+    let cur=new Date(state.viewStart);
+    while(cur.getDay()!==6) cur=addDays(cur,1);   // primer sábado
+    for(; cur<=state.viewEnd; cur=addDays(cur,7)){
+      const wb=document.createElement('div'); wb.className='weekend-band';
+      wb.style.left=px(cur)+'px'; wb.style.width=(2*pxDay)+'px';
+      wb.style.height=state.geom.totalH+'px';
+      c.appendChild(wb);
+    }
+  }
+  // linea de hoy
+  const tl=document.createElement('div'); tl.className='today-line'; tl.style.left=px(today())+'px'; c.appendChild(tl);
+  const tag=document.createElement('div'); tag.className='today-tag'; tag.textContent='HOY'; tag.style.left=px(today())+'px'; c.appendChild(tag);
+
+  // bloques
+  for(const t of state.tasks){
+    if(t.status==='backlog'||!t.domain_id) continue;
+    if(t.is_priority) renderPriorityBlock(c, t);
+    else renderTaskBlock(c, t);
+  }
+}
+
+function blockBase(t){
+  const el=document.createElement('div');
+  el.className='block '+t.status;
+  el.style.left=px(t.start_date)+'px';
+  el.style.width=widthFor(Number(t.scope_weeks))+'px';
+  el.style.background=t.color;
+  el.dataset.id=t.id;
+  return el;
+}
+
+// Dibuja una tarea (o subtarea) como segmentos partidos por las prioritarias
+function drawSegments(c, t, baseStart, durNum, top, opts){
+  // solo cortan las prioritarias que afectan a ESTA horizontal (dominio)
+  const wins=WINDOWS.filter(w=>w.domains.has(opts.domain)).sort((a,b)=>a.s-b.s);
+  const segs=segmentize(baseStart, durNum, wins);
+  segs.forEach((seg,i)=>{
+    const left=px(seg[0]); const w=Math.max(8, px(seg[1])-left);
+    const el=document.createElement('div');
+    el.className='block '+t.status
+      +(opts.sub?' sub':'')
+      +(i>0?' cont':'')          // tramo que reanuda (corte a la izquierda)
+      +(i<segs.length-1?' cut':''); // tramo interrumpido (corte a la derecha)
+    el.style.left=left+'px'; el.style.width=w+'px';
+    el.style.top=top+'px'; el.style.height=(ROW_H-16)+'px';
+    el.style.background=t.color; el.dataset.id=t.id;
+    if(opts.sub){
+      el.innerHTML = i===0
+        ? `<div class="bn">↳ ${esc(opts.label)}</div><div class="bo">dep. de ${esc(t.name)}</div>`
+        : `<div class="bn">↪ continúa</div>`;
+      if(i===0 && opts.subObj) attachSubBlock(el, t, opts.subObj); // arrastrable en el tiempo
+      else el.addEventListener('click', ()=>openTask(t));
+    } else {
+      if(i===0){
+        const dev=devDaysClient(t), ini=initials(t.owner), prog=progressPct(t);
+        el.title=`${t.name}\nDueño: ${t.owner||'—'}\nDominio: ${domName(t.domain_id)}\nInicio: ${iso(t.start_date)} · ${t.scope_weeks} sem\nEstado: ${t.status}${dev>0?`\nDesviación: +${dev} d`:''}`;
+        el.innerHTML=`<div class="bn">${ini?`<span class="bchip">${esc(ini)}</span>`:''}${esc(t.name)}</div>`
+          +`<div class="bo">${esc(t.owner||'—')}</div>`
+          +`<span class="scope-tag">${t.scope_weeks}s</span>`
+          +(dev>0?`<span class="dev-badge">+${dev}d</span>`:'')
+          +(t.status==='doing'?`<span class="progress" style="width:${prog}%"></span>`:'');
+        attachBlock(el, t, true);
+      } else {
+        el.innerHTML=`<div class="bn">↪ ${esc(t.name)} (continúa)</div>`;
+        el.addEventListener('click', ()=>openTask(t));
+      }
+    }
+    c.appendChild(el);
+  });
+}
+
+function renderTaskBlock(c, t){
+  const top=state.geom.bandTop[t.domain_id]+ (t.lane||0)*ROW_H + 8;
+  const durNum=Math.ceil(Number(t.scope_weeks)*7);
+  drawSegments(c, t, new Date(t.start_date), durNum, top, {sub:false, domain:t.domain_id});
+
+  // subrutinas cross-dominio (también se parten si las cruza una prioritaria)
+  for(const s of (t.subtasks||[])){
+    if(!s.domain_id) continue;
+    const subStart=addDays(new Date(t.start_date), Math.round(Number(s.offset_weeks)*7));
+    const projRows=state.geom.projRows[s.domain_id]||1;
+    const subLane=state.geom.subLanes[t.id+'-'+s.id]||0;
+    const subTop=state.geom.bandTop[s.domain_id]+(projRows+subLane)*ROW_H+8; // SIEMPRE debajo de los proyectos
+    const subDur=Math.ceil(Number(s.scope_weeks)*7);
+    drawSegments(c, t, subStart, subDur, subTop, {sub:true, label:s.name||t.name, domain:s.domain_id, subObj:s});
+    // conector vertical situado en el INICIO de la subrutina (no cruza la prioritaria)
+    const line=document.createElement('div'); line.className='dep-line';
+    const y1=state.geom.bandTop[t.domain_id]+(t.lane||0)*ROW_H+ROW_H/2;
+    const y2=subTop+(ROW_H-16)/2;
+    line.style.left=px(subStart)+'px';
+    line.style.top=Math.min(y1,y2)+'px';
+    line.style.height=Math.abs(y2-y1)+'px';
+    c.appendChild(line);
+  }
+}
+
+// Tarea prioritaria: se dibuja SOLO sobre las horizontales que afecta
+// (su dominio + los de sus subtareas). Los dominios NO afectados que queden
+// en medio permanecen visibles (no se tapan ni se cortan). Dominios afectados
+// contiguos se fusionan en un solo bloque para que se vea como una sola pieza.
+function renderPriorityBlock(c, t){
+  const doms=new Set([t.domain_id]);
+  let maxEndDays = Math.ceil(Number(t.scope_weeks)*7);
+  for(const s of (t.subtasks||[])){
+    if(s.domain_id) doms.add(s.domain_id);
+    maxEndDays=Math.max(maxEndDays, Math.round(Number(s.offset_weeks)*7)+Math.ceil(Number(s.scope_weeks)*7));
+  }
+  const order=state.domains.map(d=>d.id);
+  const idxs=[...doms].map(id=>order.indexOf(id)).filter(i=>i>=0).sort((a,b)=>a-b);
+  // agrupar dominios afectados que sean contiguos en el orden de swimlanes
+  const groups=[]; let g=null;
+  for(const i of idxs){ if(g && i===g[g.length-1]+1) g.push(i); else { g=[i]; groups.push(g); } }
+
+  const left=px(t.start_date);
+  const width=Math.max(34, maxEndDays*ZOOMS[state.zoom].pxDay);
+  const domNames=[...doms].map(id=>state.domains.find(d=>d.id===id)?.name).filter(Boolean).join(', ');
+
+  groups.forEach((grp,gi)=>{
+    const topId=order[grp[0]], botId=order[grp[grp.length-1]];
+    const top=state.geom.bandTop[topId];
+    const bottom=state.geom.bandTop[botId]+state.geom.bandH[botId];
+    const el=document.createElement('div');
+    el.className='block priority '+t.status;
+    el.style.left=left+'px'; el.style.width=width+'px';
+    el.style.top=(top+6)+'px'; el.style.height=(bottom-top-12)+'px';
+    el.style.background='linear-gradient(135deg,#ef4444,#b91c1c)';
+    el.dataset.id=t.id;
+    el.title=`⚡ PRIORITARIA: ${t.name}\nDueño: ${t.owner||'—'}\nInicio: ${iso(t.start_date)} · ${t.scope_weeks} sem\nAfecta: ${domNames}`;
+    if(gi===0){
+      el.innerHTML=`<div class="bn">⚡ ${esc(t.name)} <span class="badge">PRIORITARIA</span></div>
+        <div class="bo">${esc(t.owner||'—')} · ${t.scope_weeks}s · ${esc(domNames)}</div>`;
+      attachBlock(el, t, true);
+    } else {
+      el.addEventListener('click', ()=>openTask(t));
+    }
+    c.appendChild(el);
+  });
+}
+
+// =================== DRAG & EDIT en bloques ===================
+function attachBlock(el, t, allowDrag){
+  let sx, sy, moved, startLeft, startTop, dragging=false;
+  el.addEventListener('pointerdown', (e)=>{
+    if(e.button!==0) return;
+    dragging=true; moved=false; sx=e.clientX; sy=e.clientY;
+    startLeft=parseFloat(el.style.left); startTop=parseFloat(el.style.top);
+    el.setPointerCapture(e.pointerId);
+  });
+  el.addEventListener('pointermove', (e)=>{
+    if(!dragging) return;
+    const dx=e.clientX-sx, dy=e.clientY-sy;
+    if(Math.abs(dx)>4||Math.abs(dy)>4) moved=true;
+    if(moved){ el.style.left=(startLeft+dx)+'px'; if(!t.is_priority) el.style.top=(startTop+dy)+'px'; }
+  });
+  el.addEventListener('pointerup', async (e)=>{
+    if(!dragging) return; dragging=false;
+    if(!moved){ openTask(t); return; }
+    // nueva fecha
+    const newLeft=parseFloat(el.style.left);
+    const newDays=Math.round(newLeft/ZOOMS[state.zoom].pxDay);
+    const newStart=iso(addDays(state.viewStart, newDays));
+    const patch={ start_date:newStart };
+    if(!t.is_priority){
+      const newTop=parseFloat(el.style.top);
+      const {domain,lane}=domLaneFromY(newTop);
+      if(domain){ patch.domain_id=domain; patch.lane=lane; }
+    }
+    await api.send('/api/tasks/'+t.id,'PUT',patch);
+    await loadAll();
+  });
+}
+function domLaneFromY(y){
+  for(const d of state.domains){
+    const top=state.geom.bandTop[d.id], h=state.geom.bandH[d.id];
+    if(y>=top && y<top+h){
+      const lane=Math.max(0, Math.round((y-top-8)/ROW_H));
+      return {domain:d.id, lane};
+    }
+  }
+  return {domain:null, lane:0};
+}
+
+// Arrastre horizontal de una subrutina: define cuándo INICIA (independiente del padre)
+function attachSubBlock(el, t, s){
+  let sx, moved=false, startLeft, dragging=false;
+  el.addEventListener('pointerdown',(e)=>{ if(e.button!==0)return; dragging=true; moved=false; sx=e.clientX; startLeft=parseFloat(el.style.left); el.setPointerCapture(e.pointerId); });
+  el.addEventListener('pointermove',(e)=>{ if(!dragging)return; const dx=e.clientX-sx; if(Math.abs(dx)>4)moved=true; if(moved) el.style.left=(startLeft+dx)+'px'; });
+  el.addEventListener('pointerup', async ()=>{
+    if(!dragging)return; dragging=false;
+    if(!moved){ openTask(t); return; }
+    const newDays=Math.round(parseFloat(el.style.left)/ZOOMS[state.zoom].pxDay);
+    const newStart=addDays(state.viewStart, newDays);
+    const offsetW=(newStart - new Date(t.start_date))/(7*DAY_MS); // desfase en semanas (puede ser negativo)
+    await api.send('/api/subtasks/'+s.id,'PUT',{offset_weeks:offsetW});
+    await loadAll();
+  });
+}
+
+// drop desde backlog sobre el canvas
+$('#canvas').addEventListener('dragover', e=>e.preventDefault());
+$('#canvas').addEventListener('drop', async (e)=>{
+  e.preventDefault();
+  const id=e.dataTransfer.getData('text/plain'); if(!id) return;
+  const rect=$('#canvas').getBoundingClientRect();
+  const x=e.clientX-rect.left, y=e.clientY-rect.top;
+  const days=Math.round(x/ZOOMS[state.zoom].pxDay);
+  const start=iso(addDays(state.viewStart, days));
+  const {domain,lane}=domLaneFromY(y);
+  const patch={ status:'doing', start_date:start, baseline_start:start, lane };
+  if(domain) patch.domain_id=domain;
+  await api.send('/api/tasks/'+id,'PUT',patch);
+  await loadAll();
+});
+
+// =================== MODAL ===================
+let editing=null;
+function fillDomains(sel, val){
+  sel.innerHTML=state.domains.map(d=>`<option value="${d.id}" ${d.id===val?'selected':''}>${esc(d.name)}</option>`).join('');
+}
+function colorRow(sel){
+  const row=$('#colorRow'); row.innerHTML='';
+  PALETTE.forEach(c=>{
+    const s=document.createElement('div'); s.className='swatch'+(c===sel?' sel':''); s.style.background=c;
+    s.onclick=()=>{ $('#colorRow').dataset.color=c; [...row.children].forEach(x=>x.classList.remove('sel')); s.classList.add('sel'); };
+    row.appendChild(s);
+  });
+  row.dataset.color=sel||'';
+}
+function openNew(priority){
+  editing=null;
+  $('#modalTitle').textContent= priority?'⚡ Nueva tarea prioritaria':'Nuevo proyecto';
+  $('#f_id').value=''; $('#f_priority').value=priority?'true':'false';
+  $('#f_name').value=''; $('#f_owner').value=''; $('#f_desc').value='';
+  $('#f_scope').value=priority?1:2; $('#f_start').value=iso(today());
+  $('#f_status').value=priority?'doing':'backlog';
+  fillDomains($('#f_domain'), state.domains[0]?.id);
+  $('#colorRow').style.display= priority?'none':'flex';
+  if(!priority) colorRow(PALETTE[0]); else $('#colorRow').dataset.color=RED;
+  $('#subsList').innerHTML=''; $('#btnDelete').hidden=true;
+  $('#modal').hidden=false;
+}
+function openTask(t){
+  editing=t;
+  $('#modalTitle').textContent= t.is_priority?'⚡ Editar prioritaria':'Editar proyecto';
+  $('#f_id').value=t.id; $('#f_priority').value=t.is_priority?'true':'false';
+  $('#f_name').value=t.name; $('#f_owner').value=t.owner||''; $('#f_desc').value=t.description||'';
+  $('#f_scope').value=t.scope_weeks; $('#f_start').value=t.start_date?iso(t.start_date):iso(today());
+  $('#f_status').value=t.status;
+  fillDomains($('#f_domain'), t.domain_id);
+  $('#colorRow').style.display= t.is_priority?'none':'flex';
+  if(!t.is_priority) colorRow(t.color); else $('#colorRow').dataset.color=RED;
+  $('#subsList').innerHTML=''; (t.subtasks||[]).forEach(s=>addSubRow(s));
+  $('#btnDelete').hidden=false;
+  $('#modal').hidden=false;
+}
+function addSubRow(s){
+  const parentStart=$('#f_start').value || iso(today());
+  const subStart = s ? iso(addDays(new Date(parentStart), Math.round(Number(s.offset_weeks)*7))) : parentStart;
+  const row=document.createElement('div'); row.className='sub-row';
+  row.innerHTML=`<select class="s_dom">${state.domains.map(d=>`<option value="${d.id}" ${s&&d.id===s.domain_id?'selected':''}>${esc(d.name)}</option>`).join('')}</select>
+    <input class="s_name" placeholder="Nombre" value="${s?esc(s.name||''):''}" style="flex:2">
+    <input class="s_start" type="date" value="${subStart}" title="inicio de la subrutina" style="width:140px">
+    <input class="s_scope" type="number" min="0.5" step="0.5" value="${s?s.scope_weeks:1}" title="semanas" style="width:64px">
+    <span class="x">✕</span>`;
+  row.querySelector('.x').onclick=()=>row.remove();
+  if(s) row.dataset.id=s.id;
+  $('#subsList').appendChild(row);
+}
+
+$('#taskForm').addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  const priority=$('#f_priority').value==='true';
+  const body={
+    name:$('#f_name').value.trim(), owner:$('#f_owner').value.trim(),
+    description:$('#f_desc').value.trim(), domain_id:+$('#f_domain').value,
+    status:$('#f_status').value, scope_weeks:+$('#f_scope').value,
+    start_date:$('#f_start').value, is_priority:priority,
+    color: priority?RED:($('#colorRow').dataset.color||null),
+  };
+  let taskId;
+  if(editing){
+    await api.send('/api/tasks/'+editing.id,'PUT',body);
+    taskId=editing.id;
+    // resync subtareas: borrar y recrear (simple y robusto)
+    for(const s of (editing.subtasks||[])) await api.send('/api/subtasks/'+s.id,'DELETE');
+  } else {
+    if(!body.start_date) body.start_date=iso(today());
+    body.baseline_start=body.start_date;
+    const r=await api.send('/api/tasks','POST',body);
+    taskId=r.task.id;
+  }
+  // crear subtareas desde el formulario (el desfase se calcula desde la fecha de inicio)
+  const parentStart = body.start_date || iso(today());
+  for(const row of $('#subsList').querySelectorAll('.sub-row')){
+    const subStart = row.querySelector('.s_start').value || parentStart;
+    const offsetW = (new Date(subStart) - new Date(parentStart)) / (7*86400000);
+    await api.send('/api/tasks/'+taskId+'/subtasks','POST',{
+      domain_id:+row.querySelector('.s_dom').value,
+      name:row.querySelector('.s_name').value.trim(),
+      scope_weeks:+row.querySelector('.s_scope').value,
+      offset_weeks:offsetW,
+    });
+  }
+  $('#modal').hidden=true;
+  await loadAll();
+});
+$('#btnDelete').onclick=async()=>{ if(editing && confirm('¿Eliminar esta tarea?')){ await api.send('/api/tasks/'+editing.id,'DELETE'); $('#modal').hidden=true; await loadAll(); } };
+$('#btnCancel').onclick=()=>$('#modal').hidden=true;
+$('#addSub').onclick=()=>addSubRow(null);
+$('#btnNew').onclick=()=>openNew(false);
+$('#btnPriority').onclick=()=>openNew(true);
+
+// =================== ZOOM ===================
+document.querySelectorAll('.zoom button').forEach(b=>{
+  b.onclick=()=>{ document.querySelectorAll('.zoom button').forEach(x=>x.classList.remove('active')); b.classList.add('active'); state.zoom=b.dataset.zoom; renderBoard(); };
+});
+
+// =================== REPORTERIA ===================
+$('#btnReport').onclick=async()=>{
+  const r=await api.get('/api/report');
+  const body=$('#reportBody');
+  const st=r.byStatus;
+  const tot=r.total||1;
+  body.innerHTML=`
+    <div class="rep-cards">
+      <div class="rep-card"><div class="v">${r.total}</div><div class="l">Proyectos totales</div></div>
+      <div class="rep-card danger"><div class="v">${r.priority}</div><div class="l">Priorizados (⚡)</div></div>
+      <div class="rep-card"><div class="v">${r.delayed}</div><div class="l">Con desviación &gt;0</div></div>
+      <div class="rep-card"><div class="v">${r.onTime}</div><div class="l">En tiempo</div></div>
+      <div class="rep-card"><div class="v">${r.totalDevWeeks}s</div><div class="l">Desviación total (${r.totalDevDays} d)</div></div>
+      <div class="rep-card"><div class="v">${r.avgDevDays} d</div><div class="l">Desviación promedio</div></div>
+      <div class="rep-card danger"><div class="v">${r.priorityDevWeeks}s</div><div class="l">Desv. por prioridades (${r.priorityDevDays} d)</div></div>
+      <div class="rep-card"><div class="v">${tot? Math.round(st.ended/tot*100):0}%</div><div class="l">Completado</div></div>
+    </div>
+    <h4>Distribución por estado</h4>
+    <div class="statusbars">
+      <span style="background:#64748b;width:${st.backlog/tot*100}%">${st.backlog} backlog</span>
+      <span style="background:#3b82f6;width:${st.doing/tot*100}%">${st.doing} doing</span>
+      <span style="background:#22c55e;width:${st.ended/tot*100}%">${st.ended} ended</span>
+    </div>
+    <h4>Por dominio</h4>
+    <table class="rep"><thead><tr><th>Dominio</th><th>Proyectos</th><th>Priorizados</th><th>Desviación</th><th></th></tr></thead>
+    <tbody>${r.perDomain.map(d=>`<tr>
+      <td>${esc(d.domain)}</td><td>${d.count}</td><td>${d.priority}</td>
+      <td>${d.devWeeks}s (${d.devDays} d)</td>
+      <td style="width:35%"><div class="bar" style="width:${Math.min(100,Math.abs(d.devDays)*3)}%;background:${d.devDays>0?'#ef4444':'#22c55e'}"></div></td>
+    </tr>`).join('')}</tbody></table>`;
+  $('#reportModal').hidden=false;
+};
+$('#closeReport').onclick=()=>$('#reportModal').hidden=true;
+
+// =================== DOMINIOS ===================
+async function openDomains(){ await renderDomainList(); $('#domainModal').hidden=false; }
+async function renderDomainList(){
+  state.domains = await api.get('/api/domains');
+  const wrap=$('#domainList'); wrap.innerHTML='';
+  state.domains.forEach((d,i)=>{
+    const row=document.createElement('div'); row.className='dom-row';
+    row.innerHTML=`
+      <input type="color" class="d_color" value="${d.color}">
+      <input class="d_name" value="${esc(d.name)}">
+      <button class="btn btn-sm btn-ghost d_up" ${i===0?'disabled':''}>↑</button>
+      <button class="btn btn-sm btn-ghost d_down" ${i===state.domains.length-1?'disabled':''}>↓</button>
+      <button class="btn btn-sm d_del" style="color:#ef4444">✕</button>`;
+    row.querySelector('.d_name').onchange=e=>saveDomain(d.id,{name:e.target.value.trim()||'Sin nombre'});
+    row.querySelector('.d_color').onchange=e=>saveDomain(d.id,{color:e.target.value});
+    row.querySelector('.d_up').onclick=()=>moveDomain(i,-1);
+    row.querySelector('.d_down').onclick=()=>moveDomain(i,1);
+    row.querySelector('.d_del').onclick=()=>delDomain(d);
+    wrap.appendChild(row);
+  });
+}
+async function reloadDomains(){ await loadAll(); await renderDomainList(); }
+async function saveDomain(id,patch){ await api.send('/api/domains/'+id,'PUT',patch); await reloadDomains(); }
+async function moveDomain(i,dir){
+  const arr=[...state.domains]; const j=i+dir; if(j<0||j>=arr.length) return;
+  [arr[i],arr[j]]=[arr[j],arr[i]];
+  for(let k=0;k<arr.length;k++) await api.send('/api/domains/'+arr[k].id,'PUT',{position:k});
+  await reloadDomains();
+}
+async function delDomain(d){
+  if(!confirm(`¿Eliminar el dominio "${d.name}"? Sus tareas volverán al backlog.`)) return;
+  await api.send('/api/domains/'+d.id,'DELETE'); await reloadDomains();
+}
+$('#btnLegend').onclick=()=>{ const l=$('#legend'); l.hidden=!l.hidden; };
+$('#btnDomains').onclick=openDomains;
+$('#addDomain').onclick=async()=>{
+  const maxPos=state.domains.reduce((m,d)=>Math.max(m,d.position),-1);
+  const color=PALETTE[state.domains.length % PALETTE.length];
+  await api.send('/api/domains','POST',{name:'Nuevo dominio', color, position:maxPos+1});
+  await reloadDomains();
+};
+$('#closeDomains').onclick=()=>$('#domainModal').hidden=true;
+
+// =================== EXPORT ===================
+$('#btnExport').onclick=async()=>{
+  const data={ exported:new Date().toISOString(), domains:state.domains, tasks:state.tasks };
+  const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download='projectyzer-'+iso(today())+'.json'; a.click();
+};
+
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+loadAll();
