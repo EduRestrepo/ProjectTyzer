@@ -168,4 +168,9 @@ table.rep th{color:var(--muted);font-weight:600}
 #importPreviewBody td {
   border-bottom: 1px solid var(--line);
 }
+.period-band {
+  position: absolute;
+  top: 0;
+  pointer-events: none;
+}
 

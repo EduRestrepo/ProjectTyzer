@@ -295,6 +295,68 @@ function renderCanvas(canvasW){
       c.appendChild(wb);
     }
   }
+
+  // Bandas periodicas (mes, Q, H, año) con colores difuminados y semitransparentes
+  if (['month', 'quarter', 'semester', 'year'].includes(state.zoom)) {
+    let cur = new Date(state.viewStart);
+    cur = new Date(cur.getFullYear(), cur.getMonth(), 1); // alinear al 1 de mes
+
+    const colors = [
+      'rgba(59, 130, 246, 0.04)',   // Azul sutil
+      'rgba(139, 92, 246, 0.04)',   // Violeta sutil
+      'rgba(16, 185, 129, 0.04)',   // Verde sutil
+      'rgba(245, 158, 11, 0.04)',   // Ámbar sutil
+    ];
+    let colorIdx = 0;
+
+    while (cur <= state.viewEnd) {
+      let isBoundary = false;
+      
+      if (state.zoom === 'month') {
+        isBoundary = true;
+      } else if (state.zoom === 'quarter') {
+        isBoundary = (cur.getMonth() % 3 === 0);
+      } else if (state.zoom === 'semester') {
+        isBoundary = (cur.getMonth() === 0 || cur.getMonth() === 6);
+      } else if (state.zoom === 'year') {
+        isBoundary = (cur.getMonth() === 0);
+      }
+
+      if (isBoundary) {
+        let next = new Date(cur);
+        if (state.zoom === 'month') {
+          next.setMonth(next.getMonth() + 1);
+        } else if (state.zoom === 'quarter') {
+          next.setMonth(next.getMonth() + 3);
+        } else if (state.zoom === 'semester') {
+          next.setMonth(next.getMonth() + 6);
+        } else if (state.zoom === 'year') {
+          next.setFullYear(next.getFullYear() + 1);
+        }
+
+        const left = px(cur);
+        const right = px(next);
+        const width = right - left;
+
+        if (width > 0) {
+          const bgCol = colors[colorIdx % colors.length];
+          colorIdx++;
+
+          const band = document.createElement('div');
+          band.className = 'period-band';
+          band.style.left = left + 'px';
+          band.style.width = width + 'px';
+          band.style.height = state.geom.totalH + 'px';
+          band.style.background = `linear-gradient(90deg, ${bgCol} 0%, rgba(15, 23, 42, 0) 100%)`;
+          band.style.borderLeft = `1px dashed ${bgCol.replace('0.04', '0.25')}`;
+          c.appendChild(band);
+        }
+      }
+
+      cur.setMonth(cur.getMonth() + 1);
+    }
+  }
+
   // linea de hoy
   const tl=document.createElement('div'); tl.className='today-line'; tl.style.left=px(today())+'px'; c.appendChild(tl);
   const tag=document.createElement('div'); tag.className='today-tag'; tag.textContent='HOY'; tag.style.left=px(today())+'px'; c.appendChild(tag);
@@ -713,12 +775,21 @@ $('#csvFileInput').onchange = (e) => {
       // Encontrar índices de columnas
       const idIdx = headers.findIndex(h => h === 'id');
       const typeIdx = headers.findIndex(h => h === 'work item type' || h === 'tipo de elemento de trabajo');
-      const titleIdx = headers.findIndex(h => h === 'title' || h === 'título');
       const assignedIdx = headers.findIndex(h => h === 'assigned to' || h === 'asignado a');
       const areaIdx = headers.findIndex(h => h === 'area path' || h === 'ruta de acceso de área' || h === 'area');
       const descIdx = headers.findIndex(h => h === 'description' || h === 'descripción');
+      const stateIdx = headers.findIndex(h => h === 'state' || h === 'estado' || h === 'status');
+      const effortIdx = headers.findIndex(h => h === 'effort' || h === 'esfuerzo');
 
-      if (idIdx === -1 || titleIdx === -1) {
+      // Buscar todos los índices de columnas de título (Title, Título, Title 1, etc.)
+      const titleIndices = [];
+      headers.forEach((h, idx) => {
+        if (h.startsWith('title') || h.startsWith('título')) {
+          titleIndices.push(idx);
+        }
+      });
+
+      if (idIdx === -1 || titleIndices.length === 0) {
         alert('El archivo CSV debe contener al menos las columnas "ID" y "Título" / "Title".');
         return;
       }
@@ -742,34 +813,50 @@ $('#csvFileInput').onchange = (e) => {
           continue;
         }
 
-        const title = row[titleIdx].trim();
+        // Buscar el primer título no vacío en las columnas de título
+        let title = '';
+        for (const idx of titleIndices) {
+          if (row[idx] && row[idx].trim()) {
+            title = row[idx].trim();
+            break;
+          }
+        }
+        if (!title) continue;
+
         const rawAssigned = assignedIdx !== -1 ? row[assignedIdx].trim() : '';
         const areaPath = areaIdx !== -1 ? row[areaIdx].trim().toLowerCase() : '';
         const desc = descIdx !== -1 ? row[descIdx].trim().slice(0, 140) : '';
 
         // Reglas de asignación automática
         let mappedOwner = '';
-        let mappedDomName = '';
+        let mappedDomName = 'Sin dominio';
 
         const titleLower = title.toLowerCase();
         const searchText = titleLower + ' ' + areaPath;
 
-        if (searchText.includes('nube')) {
-          mappedOwner = 'Antonio Garrido';
-          mappedDomName = 'Nube';
-        } else if (searchText.includes('seguridad')) {
-          mappedOwner = 'Carlos Lopez';
-          mappedDomName = 'Seguridad';
-        } else if (searchText.includes('comunicaciones') || searchText.includes('firewall')) {
-          mappedOwner = 'David Pardo';
+        // Intentar emparejar dinámicamente con los dominios del sistema
+        const matchedDomain = state.domains.find(d => 
+          searchText.includes(d.name.toLowerCase())
+        );
+
+        if (matchedDomain) {
+          mappedDomName = matchedDomain.name;
+        } else if (searchText.includes('firewall')) {
           mappedDomName = 'Comunicaciones';
-        } else if (searchText.includes('tierra')) {
+        }
+
+        // Asignación de dueño
+        if (mappedDomName.toLowerCase() === 'nube') {
+          mappedOwner = 'Antonio Garrido';
+        } else if (mappedDomName.toLowerCase() === 'seguridad') {
+          mappedOwner = 'Carlos Lopez';
+        } else if (mappedDomName.toLowerCase() === 'comunicaciones') {
+          mappedOwner = 'David Pardo';
+        } else if (mappedDomName.toLowerCase() === 'tierra') {
           mappedOwner = 'Oliver Araújo';
-          mappedDomName = 'Tierra';
         } else {
           // Asignación por defecto basada en CSV quitando correo si existe
-          mappedOwner = rawAssigned.split('<')[0].trim();
-          mappedDomName = 'Sin dominio';
+          mappedOwner = rawAssigned ? rawAssigned.split('<')[0].trim() : '';
         }
 
         const domain = state.domains.find(d => d.name.toLowerCase() === mappedDomName.toLowerCase());
@@ -778,14 +865,28 @@ $('#csvFileInput').onchange = (e) => {
         const exists = state.tasks.some(t => t.devops_id === devopsId);
         const actionLabel = exists ? 'Actualizar' : 'Crear';
 
+        // Mapeo del estado/status
+        const rawState = stateIdx !== -1 ? row[stateIdx].trim().toLowerCase() : '';
+        let mappedStatus = 'backlog';
+        if (['completed', 'resolved', 'closed', 'ended'].includes(rawState)) {
+          mappedStatus = 'ended';
+        } else if (['in progress', 'doing', 'validate'].includes(rawState)) {
+          mappedStatus = 'doing';
+        }
+
+        // Mapeo del esfuerzo / alcance en semanas
+        const rawEffort = effortIdx !== -1 && row[effortIdx] ? parseFloat(row[effortIdx].trim()) : NaN;
+        const scopeWeeks = !isNaN(rawEffort) && rawEffort > 0 ? rawEffort : 2;
+
+        const currentIndex = parsedDevOpsTasks.length;
         parsedDevOpsTasks.push({
           devops_id: devopsId,
           name: title,
           owner: mappedOwner,
           description: desc,
           domain_id: domainId,
-          status: 'backlog',
-          scope_weeks: 2,
+          status: mappedStatus,
+          scope_weeks: scopeWeeks,
         });
 
         const tr = document.createElement('tr');
@@ -793,8 +894,21 @@ $('#csvFileInput').onchange = (e) => {
           <td style="padding: 8px;">${devopsId}</td>
           <td style="padding: 8px; font-weight: 600;">${esc(title)}</td>
           <td style="padding: 8px;"><span class="st" style="background:#475569; color:#fff">${esc(type)}</span></td>
-          <td style="padding: 8px;">${esc(mappedOwner || '—')}</td>
-          <td style="padding: 8px;">${esc(domain ? domain.name : 'Sin dominio')}</td>
+          <td style="padding: 8px;"><input type="text" class="import-owner" value="${esc(mappedOwner)}" data-index="${currentIndex}" style="width: 100%; box-sizing: border-box; padding: 4px;"></td>
+          <td style="padding: 8px;">
+            <select class="import-domain" data-index="${currentIndex}" style="width: 100%; box-sizing: border-box; padding: 4px;">
+              ${state.domains.map(d => `<option value="${d.id}" ${d.id === domainId ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}
+              <option value="" ${domainId === null ? 'selected' : ''}>Sin dominio</option>
+            </select>
+          </td>
+          <td style="padding: 8px;">
+            <select class="import-status" data-index="${currentIndex}" style="width: 100%; box-sizing: border-box; padding: 4px;">
+              <option value="backlog" ${mappedStatus === 'backlog' ? 'selected' : ''}>Backlog</option>
+              <option value="doing" ${mappedStatus === 'doing' ? 'selected' : ''}>Doing</option>
+              <option value="ended" ${mappedStatus === 'ended' ? 'selected' : ''}>Ended</option>
+            </select>
+          </td>
+          <td style="padding: 8px;"><input type="number" min="0.5" step="0.5" class="import-scope" value="${scopeWeeks}" data-index="${currentIndex}" style="width: 60px; box-sizing: border-box; padding: 4px;"></td>
           <td style="padding: 8px;"><span class="st" style="background:${exists ? '#f59e0b' : '#22c55e'}; color:#fff">${actionLabel}</span></td>
         `;
         previewBody.appendChild(tr);
@@ -812,6 +926,25 @@ $('#csvFileInput').onchange = (e) => {
   };
   reader.readAsText(file);
 };
+
+// Escuchar cambios en la tabla de previsualización para actualizar dinámicamente el payload
+$('#importPreviewBody').addEventListener('change', (evt) => {
+  const target = evt.target;
+  const idx = parseInt(target.dataset.index, 10);
+  if (isNaN(idx)) return;
+  const item = parsedDevOpsTasks[idx];
+  if (!item) return;
+
+  if (target.classList.contains('import-owner')) {
+    item.owner = target.value.trim();
+  } else if (target.classList.contains('import-domain')) {
+    item.domain_id = target.value ? parseInt(target.value, 10) : null;
+  } else if (target.classList.contains('import-status')) {
+    item.status = target.value;
+  } else if (target.classList.contains('import-scope')) {
+    item.scope_weeks = parseFloat(target.value) || 2;
+  }
+});
 
 $('#cancelImport').onclick = () => {
   $('#importModal').hidden = true;

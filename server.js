@@ -128,21 +128,58 @@ app.post('/api/tasks', wrap(async (req, res) => {
 
 app.put('/api/tasks/:id', wrap(async (req, res) => {
   const f = req.body;
-  // Al mover una tarea (cambia start_date) actualizamos tambien planned_start
-  // = intencion del usuario / linea base de programacion. baseline_start NO cambia
-  // (se conserva para medir desviacion). Luego recalculamos por las prioritarias.
+  
+  // Obtener la tarea actual
+  const { rows: current } = await pool.query('SELECT * FROM tasks WHERE id = $1', [req.params.id]);
+  if (current.length === 0) {
+    return res.status(404).json({ error: 'Tarea no encontrada' });
+  }
+  const task = current[0];
+
+  const name = f.name !== undefined ? f.name : task.name;
+  const owner = f.owner !== undefined ? f.owner : task.owner;
+  const description = f.description !== undefined ? f.description : task.description;
+  const domain_id = f.domain_id !== undefined ? f.domain_id : task.domain_id;
+  const status = f.status !== undefined ? f.status : task.status;
+  const color = f.color !== undefined ? f.color : task.color;
+  const scope_weeks = f.scope_weeks !== undefined ? f.scope_weeks : task.scope_weeks;
+  const baseline_start = f.baseline_start !== undefined ? f.baseline_start : task.baseline_start;
+  const lane = f.lane !== undefined ? f.lane : task.lane;
+
+  let start_date = f.start_date !== undefined ? f.start_date : task.start_date;
+  let planned_start = f.start_date !== undefined ? f.start_date : task.planned_start;
+
+  // Si es backlog, limpiamos las fechas
+  if (status === 'backlog') {
+    start_date = null;
+    planned_start = null;
+  }
+
+  // Convertir cadenas vacías o fechas tipo Date a formato de fecha YYYY-MM-DD
+  const formatDate = (val) => {
+    if (!val) return null;
+    if (val instanceof Date) return val.toISOString().slice(0, 10);
+    if (typeof val === 'string') {
+      if (val === '') return null;
+      return val.slice(0, 10); // corta YYYY-MM-DD de un ISO string si viniera así
+    }
+    return val;
+  };
+
+  const formattedStartDate = formatDate(start_date);
+  const formattedPlannedStart = formatDate(planned_start);
+  const formattedBaselineStart = formatDate(baseline_start);
+
   const { rows } = await pool.query(
     `UPDATE tasks SET
-       name=COALESCE($2,name), owner=COALESCE($3,owner),
-       description=COALESCE($4,description), domain_id=COALESCE($5,domain_id),
-       status=COALESCE($6,status), color=COALESCE($7,color),
-       scope_weeks=COALESCE($8,scope_weeks), baseline_start=COALESCE($9,baseline_start),
-       start_date=COALESCE($10,start_date), planned_start=COALESCE($10,planned_start),
-       lane=COALESCE($11,lane)
-     WHERE id=$1 RETURNING *`,
-    [req.params.id, f.name, f.owner, f.description, f.domain_id, f.status,
-     f.color, f.scope_weeks, f.baseline_start, f.start_date, f.lane]
+       name = $2, owner = $3, description = $4, domain_id = $5,
+       status = $6, color = $7, scope_weeks = $8, baseline_start = $9,
+       start_date = $10, planned_start = $11, lane = $12
+     WHERE id = $1 RETURNING *`,
+    [req.params.id, name, owner, description, domain_id, status, color,
+     scope_weeks, formattedBaselineStart, formattedStartDate, formattedPlannedStart, lane]
   );
+  
   await recomputeSchedule(pool);
   res.json(rows[0]);
 }));
@@ -236,6 +273,63 @@ async function recomputeSchedule(db) {
       [t.id, interruption]
     );
   }
+
+  // Resolver solapamientos de carriles (lanes) para todas las tareas en el tablero (doing y ended)
+  const { rows: allBoardTasks } = await db.query(
+    `SELECT id, domain_id, start_date, scope_weeks, priority_shift_days, lane FROM tasks
+      WHERE is_priority = FALSE AND status IN ('doing', 'ended') AND start_date IS NOT NULL
+      ORDER BY start_date ASC, id ASC`
+  );
+
+  const domainsTasks = {};
+  for (const t of allBoardTasks) {
+    if (!domainsTasks[t.domain_id]) domainsTasks[t.domain_id] = [];
+    domainsTasks[t.domain_id].push(t);
+  }
+
+  for (const domainId in domainsTasks) {
+    const dTasks = domainsTasks[domainId];
+    const placedTasks = [];
+
+    for (const t of dTasks) {
+      const tStart = new Date(t.start_date);
+      const tEnd = addDays(tStart, durDays(t.scope_weeks) + Number(t.priority_shift_days || 0));
+
+      const originalLane = t.lane;
+      let targetLane = t.lane;
+      let checkedLanes = new Set();
+
+      while (true) {
+        const hasOverlap = placedTasks.some(p => {
+          if (p.lane !== targetLane) return false;
+          const pStart = new Date(p.start_date);
+          const pEnd = addDays(pStart, durDays(p.scope_weeks) + Number(p.priority_shift_days || 0));
+          return tStart < pEnd && tEnd > pStart;
+        });
+
+        if (!hasOverlap) {
+          break;
+        }
+
+        checkedLanes.add(targetLane);
+        if (!checkedLanes.has(0)) {
+          targetLane = 0;
+        } else {
+          targetLane++;
+          while (checkedLanes.has(targetLane)) {
+            targetLane++;
+          }
+        }
+      }
+
+      t.lane = targetLane;
+      placedTasks.push(t);
+
+      if (targetLane !== originalLane) {
+        await db.query(`UPDATE tasks SET lane = $2 WHERE id = $1`, [t.id, targetLane]);
+      }
+    }
+  }
 }
 
 // Reaplicar manualmente (boton "Replanificar")
@@ -328,20 +422,38 @@ app.post('/api/tasks/sync-csv', wrap(async (req, res) => {
       );
 
       if (existing.length > 0) {
+        const dbTask = existing[0];
+        let newStartDate = dbTask.start_date;
+        let newPlannedStart = dbTask.planned_start;
+
+        if (status === 'backlog') {
+          newStartDate = null;
+          newPlannedStart = null;
+        } else if (!newStartDate && (status === 'doing' || status === 'ended')) {
+          newStartDate = start_date || new Date().toISOString().slice(0, 10);
+          newPlannedStart = newStartDate;
+        }
+
         await client.query(
           `UPDATE tasks SET 
              name = $2, 
              owner = $3, 
              description = $4, 
              domain_id = COALESCE($5, domain_id), 
-             status = $6
+             status = $6,
+             scope_weeks = COALESCE($7, scope_weeks),
+             start_date = $8,
+             planned_start = $9
            WHERE devops_id = $1`,
-          [devopsId, name, owner, description, domain_id, status]
+          [devopsId, name, owner, description, domain_id, status, scope_weeks, newStartDate, newPlannedStart]
         );
         updatedCount++;
       } else {
         const color = await autoColor(client);
-        const startDateVal = start_date || new Date().toISOString().slice(0, 10);
+        let startDateVal = null;
+        if (status === 'doing' || status === 'ended') {
+          startDateVal = start_date || new Date().toISOString().slice(0, 10);
+        }
 
         await client.query(
           `INSERT INTO tasks (
