@@ -295,9 +295,80 @@ app.get('/api/report', wrap(async (req, res) => {
   });
 }));
 
+// ====================== SINCRONIZACION CSV DE AZURE DEVOPS ======================
+app.post('/api/tasks/sync-csv', wrap(async (req, res) => {
+  const items = req.body;
+  if (!Array.isArray(items)) {
+    return res.status(400).json({ error: 'Se esperaba un arreglo de elementos' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    let createdCount = 0;
+    let updatedCount = 0;
+
+    for (const item of items) {
+      const devopsId = parseInt(item.devops_id, 10);
+      if (isNaN(devopsId)) continue;
+
+      const {
+        name,
+        owner = '',
+        description = '',
+        domain_id = null,
+        status = 'backlog',
+        scope_weeks = 2,
+        start_date = null
+      } = item;
+
+      const { rows: existing } = await client.query(
+        'SELECT id, start_date, planned_start FROM tasks WHERE devops_id = $1',
+        [devopsId]
+      );
+
+      if (existing.length > 0) {
+        await client.query(
+          `UPDATE tasks SET 
+             name = $2, 
+             owner = $3, 
+             description = $4, 
+             domain_id = COALESCE($5, domain_id), 
+             status = $6
+           WHERE devops_id = $1`,
+          [devopsId, name, owner, description, domain_id, status]
+        );
+        updatedCount++;
+      } else {
+        const color = await autoColor(client);
+        const startDateVal = start_date || new Date().toISOString().slice(0, 10);
+
+        await client.query(
+          `INSERT INTO tasks (
+             name, owner, description, domain_id, status, color, 
+             is_priority, scope_weeks, baseline_start, start_date, planned_start, lane, devops_id
+           ) VALUES ($1, $2, $3, $4, $5, $6, FALSE, $7, $8, $8, $8, 0, $9)`,
+          [name, owner, description, domain_id, status, color, scope_weeks, startDateVal, devopsId]
+        );
+        createdCount++;
+      }
+    }
+
+    await recomputeSchedule(client);
+    await client.query('COMMIT');
+    res.json({ message: `Sincronización finalizada: ${createdCount} creadas, ${updatedCount} actualizadas.` });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}));
+
 // ====================== ARRANQUE / MIGRACION ======================
 async function ensureSchema() {
   await pool.query('ALTER TABLE tasks ADD COLUMN IF NOT EXISTS planned_start DATE');
+  await pool.query('ALTER TABLE tasks ADD COLUMN IF NOT EXISTS devops_id INTEGER UNIQUE');
   await pool.query(
     'UPDATE tasks SET planned_start = start_date WHERE planned_start IS NULL AND start_date IS NOT NULL'
   );

@@ -157,3 +157,15 @@ table.rep th{color:var(--muted);font-weight:600}
 .sw-dev{background:rgba(0,0,0,.4);color:#fde68a}
 .sw-today{width:0;height:16px;border-left:2px dashed #22d3ee}
 .sw-wknd{background:rgba(99,102,241,.25)}
+
+/* Sincronización DevOps */
+#importPreviewBody tr:nth-child(even) {
+  background: rgba(148, 163, 184, 0.03);
+}
+#importPreviewBody tr:hover {
+  background: rgba(148, 163, 184, 0.08);
+}
+#importPreviewBody td {
+  border-bottom: 1px solid var(--line);
+}
+

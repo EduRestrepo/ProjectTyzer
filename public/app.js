@@ -681,12 +681,201 @@ $('#addDomain').onclick=async()=>{
 $('#closeDomains').onclick=()=>$('#domainModal').hidden=true;
 
 // =================== EXPORT ===================
+// =================== EXPORT ===================
 $('#btnExport').onclick=async()=>{
   const data={ exported:new Date().toISOString(), domains:state.domains, tasks:state.tasks };
   const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
   a.download='projectyzer-'+iso(today())+'.json'; a.click();
 };
+
+// =================== DEVOPS CSV SYNC ===================
+let parsedDevOpsTasks = [];
+
+$('#btnImportDevOps').onclick = () => $('#csvFileInput').click();
+
+$('#csvFileInput').onchange = (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = (evt) => {
+    try {
+      const text = evt.target.result;
+      const rows = parseCSV(text);
+      if (rows.length < 2) {
+        alert('El archivo CSV está vacío o no contiene suficientes filas.');
+        return;
+      }
+
+      const headers = rows[0].map(h => h.trim().toLowerCase());
+      
+      // Encontrar índices de columnas
+      const idIdx = headers.findIndex(h => h === 'id');
+      const typeIdx = headers.findIndex(h => h === 'work item type' || h === 'tipo de elemento de trabajo');
+      const titleIdx = headers.findIndex(h => h === 'title' || h === 'título');
+      const assignedIdx = headers.findIndex(h => h === 'assigned to' || h === 'asignado a');
+      const areaIdx = headers.findIndex(h => h === 'area path' || h === 'ruta de acceso de área' || h === 'area');
+      const descIdx = headers.findIndex(h => h === 'description' || h === 'descripción');
+
+      if (idIdx === -1 || titleIdx === -1) {
+        alert('El archivo CSV debe contener al menos las columnas "ID" y "Título" / "Title".');
+        return;
+      }
+
+      parsedDevOpsTasks = [];
+      const previewBody = $('#importPreviewBody');
+      previewBody.innerHTML = '';
+
+      for (let i = 1; i < rows.length; i++) {
+        const row = rows[i];
+        if (row.length < 2 || !row[idIdx]) continue;
+
+        const devopsId = parseInt(row[idIdx].trim(), 10);
+        if (isNaN(devopsId)) continue;
+
+        const type = typeIdx !== -1 ? row[typeIdx].trim() : 'Feature';
+        
+        // Filtrar por Epic, Feature o Risk
+        const typeLower = type.toLowerCase();
+        if (!['epic', 'feature', 'risk'].includes(typeLower)) {
+          continue;
+        }
+
+        const title = row[titleIdx].trim();
+        const rawAssigned = assignedIdx !== -1 ? row[assignedIdx].trim() : '';
+        const areaPath = areaIdx !== -1 ? row[areaIdx].trim().toLowerCase() : '';
+        const desc = descIdx !== -1 ? row[descIdx].trim().slice(0, 140) : '';
+
+        // Reglas de asignación automática
+        let mappedOwner = '';
+        let mappedDomName = '';
+
+        const titleLower = title.toLowerCase();
+        const searchText = titleLower + ' ' + areaPath;
+
+        if (searchText.includes('nube')) {
+          mappedOwner = 'Antonio Garrido';
+          mappedDomName = 'Nube';
+        } else if (searchText.includes('seguridad')) {
+          mappedOwner = 'Carlos Lopez';
+          mappedDomName = 'Seguridad';
+        } else if (searchText.includes('comunicaciones') || searchText.includes('firewall')) {
+          mappedOwner = 'David Pardo';
+          mappedDomName = 'Comunicaciones';
+        } else if (searchText.includes('tierra')) {
+          mappedOwner = 'Oliver Araújo';
+          mappedDomName = 'Tierra';
+        } else {
+          // Asignación por defecto basada en CSV quitando correo si existe
+          mappedOwner = rawAssigned.split('<')[0].trim();
+          mappedDomName = 'Sin dominio';
+        }
+
+        const domain = state.domains.find(d => d.name.toLowerCase() === mappedDomName.toLowerCase());
+        const domainId = domain ? domain.id : null;
+
+        const exists = state.tasks.some(t => t.devops_id === devopsId);
+        const actionLabel = exists ? 'Actualizar' : 'Crear';
+
+        parsedDevOpsTasks.push({
+          devops_id: devopsId,
+          name: title,
+          owner: mappedOwner,
+          description: desc,
+          domain_id: domainId,
+          status: 'backlog',
+          scope_weeks: 2,
+        });
+
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td style="padding: 8px;">${devopsId}</td>
+          <td style="padding: 8px; font-weight: 600;">${esc(title)}</td>
+          <td style="padding: 8px;"><span class="st" style="background:#475569; color:#fff">${esc(type)}</span></td>
+          <td style="padding: 8px;">${esc(mappedOwner || '—')}</td>
+          <td style="padding: 8px;">${esc(domain ? domain.name : 'Sin dominio')}</td>
+          <td style="padding: 8px;"><span class="st" style="background:${exists ? '#f59e0b' : '#22c55e'}; color:#fff">${actionLabel}</span></td>
+        `;
+        previewBody.appendChild(tr);
+      }
+
+      if (parsedDevOpsTasks.length === 0) {
+        alert('No se encontraron tareas con tipo Epic, Feature o Risk en el CSV.');
+        return;
+      }
+
+      $('#importModal').hidden = false;
+    } catch (err) {
+      alert('Error al procesar el archivo CSV: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+};
+
+$('#cancelImport').onclick = () => {
+  $('#importModal').hidden = true;
+  $('#csvFileInput').value = '';
+};
+
+$('#confirmImport').onclick = async () => {
+  const btn = $('#confirmImport');
+  btn.textContent = '🔄 Procesando...';
+  btn.disabled = true;
+
+  try {
+    const res = await api.send('/api/tasks/sync-csv', 'POST', parsedDevOpsTasks);
+    alert(res.message || 'Sincronización finalizada.');
+    $('#importModal').hidden = true;
+    await loadAll();
+  } catch (err) {
+    alert('Error al guardar la sincronización: ' + err.message);
+  } finally {
+    btn.textContent = 'Confirmar Sincronización';
+    btn.disabled = false;
+    $('#csvFileInput').value = '';
+  }
+};
+
+function parseCSV(text) {
+  const lines = [];
+  let row = [""];
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    const next = text[i+1];
+    if (char === '"') {
+      if (inQuotes && next === '"') {
+        row[row.length - 1] += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (char === ',' || char === ';') {
+      if (inQuotes) {
+        row[row.length - 1] += char;
+      } else {
+        row.push("");
+      }
+    } else if (char === '\r' || char === '\n') {
+      if (inQuotes) {
+        row[row.length - 1] += char;
+      } else {
+        if (char === '\r' && next === '\n') {
+          i++;
+        }
+        lines.push(row);
+        row = [""];
+      }
+    } else {
+      row[row.length - 1] += char;
+    }
+  }
+  if (row.length > 1 || row[0] !== "") {
+    lines.push(row);
+  }
+  return lines;
+}
 
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 

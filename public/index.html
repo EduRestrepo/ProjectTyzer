@@ -24,7 +24,9 @@
     <button id="btnLegend" class="btn btn-ghost" title="Leyenda">ⓘ Leyenda</button>
     <button id="btnDomains" class="btn">⚙ Dominios</button>
     <button id="btnReport" class="btn">📊 Reportería</button>
+    <button id="btnImportDevOps" class="btn">🔄 DevOps</button>
     <button id="btnExport" class="btn btn-ghost">⬇ Exportar</button>
+    <input type="file" id="csvFileInput" accept=".csv" style="display:none">
   </div>
 </header>
 
@@ -139,6 +141,34 @@
     <div class="modal-foot">
       <span class="spacer"></span>
       <button type="button" class="btn btn-primary" id="closeDomains">Cerrar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal previsualización de importación -->
+<div class="modal-bg" id="importModal" hidden>
+  <div class="modal modal-wide">
+    <h3>🔄 Sincronización desde Azure DevOps</h3>
+    <p class="hint">Hemos detectado los siguientes proyectos en el archivo CSV. Confirma las asignaciones de dominio y responsable antes de continuar.</p>
+    <div style="max-height: 50vh; overflow: auto; border: 1px solid var(--line); border-radius: 8px; margin: 10px 0;">
+      <table class="rep" style="width: 100%;">
+        <thead>
+          <tr>
+            <th style="padding: 8px;">ID</th>
+            <th style="padding: 8px;">Título</th>
+            <th style="padding: 8px;">Tipo</th>
+            <th style="padding: 8px;">Dueño Asignado</th>
+            <th style="padding: 8px;">Dominio Asignado</th>
+            <th style="padding: 8px;">Acción</th>
+          </tr>
+        </thead>
+        <tbody id="importPreviewBody"></tbody>
+      </table>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn" id="cancelImport">Cancelar</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn btn-primary" id="confirmImport">Confirmar Sincronización</button>
     </div>
   </div>
 </div>
