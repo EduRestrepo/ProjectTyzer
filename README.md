@@ -58,23 +58,3 @@ Durante la revisión del proyecto, se han identificado las siguientes oportunida
 6. **Seguridad en Entorno**: Mover credenciales del PostgreSQL a un archivo `.env` externo y excluirlo del control de versiones.
 
 ---
-
-## Subir este proyecto a GitHub
-
-Para subir este proyecto a un repositorio de GitHub, ejecuta los siguientes comandos desde tu terminal en la raíz de este proyecto:
-
-1. **Inicializar Git y agregar archivos**:
-   ```bash
-   git init
-   git add .
-   ```
-2. **Crear el commit inicial**:
-   ```bash
-   git commit -m "Initial commit: ProjecTyzer con mejoras propuestas y documentación actualizada"
-   ```
-3. **Vincular y empujar al repositorio remoto**:
-   ```bash
-   git remote add origin <URL_DE_TU_REPOSITORIO_GITHUB>
-   git branch -M main
-   git push -u origin main
-   ```
