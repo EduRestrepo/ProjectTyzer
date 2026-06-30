@@ -551,7 +551,6 @@ function renderCanvas(canvasW){
   for(const t of state.tasks){
     if(t.status==='backlog') continue;
     if(t.is_priority) {
-      if(!state.boardFilter[t.status]) continue;
       renderPriorityBlock(c, t);
     } else {
       if(!t.domain_id) continue;

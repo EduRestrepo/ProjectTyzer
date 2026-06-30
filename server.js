@@ -380,9 +380,12 @@ app.get('/api/report', wrap(async (req, res) => {
     priorityDevDays += Number(t.priority_shift_days || 0);
     const dom = t.domain_id || 'sin';
     perDomain[dom] = perDomain[dom] || { count: 0, devDays: 0, priority: 0 };
-    perDomain[dom].count += 1;
-    perDomain[dom].devDays += d;
-    if (t.is_priority) perDomain[dom].priority += 1;
+    if (t.is_priority) {
+      perDomain[dom].priority += 1;
+    } else {
+      perDomain[dom].count += 1;
+      perDomain[dom].devDays += d;
+    }
   }
 
   const { rows: domains } = await pool.query('SELECT id, name FROM domains');
@@ -400,7 +403,7 @@ app.get('/api/report', wrap(async (req, res) => {
     priorityDevDays,
     priorityDevWeeks: +(priorityDevDays / 7).toFixed(1),
     perDomain: Object.entries(perDomain).map(([id, v]) => ({
-      domain: domainName[id] || 'Sin dominio',
+      domain: domainName[id] || 'Cross-dominio (Prioritarias)',
       ...v,
       devWeeks: +(v.devDays / 7).toFixed(1),
     })),
