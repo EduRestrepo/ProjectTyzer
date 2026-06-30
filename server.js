@@ -49,7 +49,8 @@ async function autoColor(client) {
 
 const isoDate = (d) => new Date(d).toISOString().slice(0, 10);
 const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
-const durDays = (weeks) => Math.ceil(Number(weeks) * 7);
+// Misma convención que el front (public/app.js: weeksToDays) -> evita 1 día de descuadre.
+const durDays = (weeks) => Math.round(Number(weeks) * 7);
 
 // ====================== DOMINIOS ======================
 app.get('/api/domains', wrap(async (req, res) => {
@@ -64,6 +65,22 @@ app.post('/api/domains', wrap(async (req, res) => {
     [name, color, position]
   );
   res.status(201).json(rows[0]);
+}));
+
+// Reordena todos los dominios en una sola transacción (1 round-trip en vez de N).
+app.post('/api/domains/reorder', wrap(async (req, res) => {
+  const order = req.body && req.body.order;
+  if (!Array.isArray(order)) return res.status(400).json({ error: 'Se esperaba { order: [ids...] }' });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (let i = 0; i < order.length; i++) {
+      await client.query('UPDATE domains SET position=$2 WHERE id=$1', [order[i], i]);
+    }
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (e) { await client.query('ROLLBACK'); throw e; }
+  finally { client.release(); }
 }));
 
 app.put('/api/domains/:id', wrap(async (req, res) => {
@@ -271,6 +288,7 @@ async function recomputeSchedule(db) {
   // La tarea arranca a tiempo (start_date = planned_start) y se PARTE alrededor de
   // cada prioritaria que afecte a SU horizontal: se detiene y reanuda al terminar la roja.
   // priority_shift_days = total de dias de interrupcion (alimenta la reporteria).
+  const shiftIds = [], shiftVals = [];
   for (const t of tasks) {
     const planned = new Date(t.planned_start);
     const d = durDays(t.scope_weeks);
@@ -286,68 +304,21 @@ async function recomputeSchedule(db) {
     }
     const effEnd = addDays(cursor, remaining);
     const interruption = Math.max(0, Math.round((effEnd - planned) / DAY_MS) - d);
+    shiftIds.push(t.id); shiftVals.push(interruption);
+  }
+  // Un solo UPDATE para todas las tareas (en vez de uno por fila).
+  if (shiftIds.length) {
     await db.query(
-      `UPDATE tasks SET start_date = planned_start, priority_shift_days = $2 WHERE id = $1`,
-      [t.id, interruption]
+      `UPDATE tasks AS t SET start_date = t.planned_start, priority_shift_days = u.shift
+         FROM unnest($1::int[], $2::int[]) AS u(id, shift)
+        WHERE t.id = u.id`,
+      [shiftIds, shiftVals]
     );
   }
 
-  // Resolver solapamientos de carriles (lanes) para todas las tareas en el tablero (doing y ended)
-  const { rows: allBoardTasks } = await db.query(
-    `SELECT id, domain_id, start_date, scope_weeks, priority_shift_days, lane FROM tasks
-      WHERE is_priority = FALSE AND status IN ('doing', 'ended') AND start_date IS NOT NULL
-      ORDER BY start_date ASC, id ASC`
-  );
-
-  const domainsTasks = {};
-  for (const t of allBoardTasks) {
-    if (!domainsTasks[t.domain_id]) domainsTasks[t.domain_id] = [];
-    domainsTasks[t.domain_id].push(t);
-  }
-
-  for (const domainId in domainsTasks) {
-    const dTasks = domainsTasks[domainId];
-    const placedTasks = [];
-
-    for (const t of dTasks) {
-      const tStart = new Date(t.start_date);
-      const tEnd = addDays(tStart, durDays(t.scope_weeks) + Number(t.priority_shift_days || 0));
-
-      const originalLane = t.lane;
-      let targetLane = t.lane;
-      let checkedLanes = new Set();
-
-      while (true) {
-        const hasOverlap = placedTasks.some(p => {
-          if (p.lane !== targetLane) return false;
-          const pStart = new Date(p.start_date);
-          const pEnd = addDays(pStart, durDays(p.scope_weeks) + Number(p.priority_shift_days || 0));
-          return tStart < pEnd && tEnd > pStart;
-        });
-
-        if (!hasOverlap) {
-          break;
-        }
-
-        checkedLanes.add(targetLane);
-        if (!checkedLanes.has(0)) {
-          targetLane = 0;
-        } else {
-          targetLane++;
-          while (checkedLanes.has(targetLane)) {
-            targetLane++;
-          }
-        }
-      }
-
-      t.lane = targetLane;
-      placedTasks.push(t);
-
-      if (targetLane !== originalLane) {
-        await db.query(`UPDATE tasks SET lane = $2 WHERE id = $1`, [t.id, targetLane]);
-      }
-    }
-  }
+  // NOTA: el apilamiento de carriles (lanes) es responsabilidad EXCLUSIVA del cliente
+  // (public/app.js -> computeGeom), que reempaqueta visualmente en cada render. El servidor
+  // ya no calcula ni persiste `lane` aquí para evitar duplicar lógica e inconsistencias.
 }
 
 // Reaplicar manualmente (boton "Replanificar")

@@ -23,15 +23,25 @@ const api = {
   async get(u){ return (await fetch(u)).json(); },
   async send(u, m, b){ return (await fetch(u, {method:m, headers:{'Content-Type':'application/json'}, body: b?JSON.stringify(b):undefined})).json(); },
 };
-const iso = (d) => new Date(d).toISOString().slice(0,10);
+// --- Fechas: SIEMPRE en hora LOCAL para evitar desfases de ±1 día (UTC vs local) ---
+const pad2 = (n) => String(n).padStart(2,'0');
+const iso = (d) => { const x=new Date(d); return `${x.getFullYear()}-${pad2(x.getMonth()+1)}-${pad2(x.getDate())}`; };
 const today = () => { const d=new Date(); d.setHours(0,0,0,0); return d; };
 const addDays = (d,n) => { const x=new Date(d); x.setDate(x.getDate()+n); return x; };
-const dayDiff = (a,b) => Math.round((new Date(a)-new Date(b))/DAY_MS);
+// dayDiff normaliza ambas fechas a medianoche local => robusto ante cambios de hora (DST).
+const dayDiff = (a,b) => { const x=new Date(a), y=new Date(b); x.setHours(0,0,0,0); y.setHours(0,0,0,0); return Math.round((x-y)/DAY_MS); };
+// Parsea 'YYYY-MM-DD' como fecha local (evita que new Date('2026-06-30') se interprete en UTC).
+const parseDateLocal = (str) => {
+  if (str instanceof Date) return str;
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(str));
+  return m ? new Date(+m[1], +m[2]-1, +m[3]) : new Date(str);
+};
+// Conversión semanas<->días: una sola convención e inversas EXACTAS (fin exclusivo, snap a 0.5 sem).
+const weeksToDays = (w) => Math.round(Number(w) * 7);
+const daysToWeeks = (d) => Math.max(0.5, Math.round(d / 7 * 2) / 2);
 const getEndDateStr = (startStr, scopeWeeks) => {
   if (!startStr) return '';
-  const d = new Date(startStr);
-  const days = Math.ceil(Number(scopeWeeks) * 7);
-  return iso(addDays(d, days));
+  return iso(addDays(parseDateLocal(startStr), weeksToDays(scopeWeeks)));
 };
 
 // =================== LOAD ===================
@@ -78,18 +88,22 @@ document.querySelectorAll('#summaryFilters button').forEach(b=>{
 function computeViewStart(){
   let min = today(), max = addDays(today(), 90);
   for(const t of state.tasks){
-    if(t.start_date){
-      const s = new Date(t.start_date);
-      if(s<min) min=s;
-      const e = addDays(s, Math.ceil(t.scope_weeks*7));
-      if(e>max) max=e;
+    if(!t.start_date) continue;
+    const s = new Date(t.start_date);
+    if(s<min) min=s;
+    // fin propio incluyendo el desplazamiento por prioritarias (la tarea se alarga)
+    const e = addDays(s, weeksToDays(t.scope_weeks) + Number(t.priority_shift_days||0));
+    if(e>max) max=e;
+    // las subtareas pueden extenderse más allá del padre (offset + alcance)
+    for(const sub of (t.subtasks||[])){
+      const se = addDays(s, Math.round(Number(sub.offset_weeks)*7) + weeksToDays(sub.scope_weeks));
+      if(se>max) max=se;
     }
   }
   state.viewStart = addDays(min, -14);
   state.viewEnd = addDays(max, 21);
 }
 const px = (date) => dayDiff(date, state.viewStart) * ZOOMS[state.zoom].pxDay;
-const widthFor = (weeks) => Math.max(34, weeks*7*ZOOMS[state.zoom].pxDay);
 
 // ----- helpers visuales -----
 function initials(name){ if(!name) return ''; return name.split(/\s+/).filter(Boolean).slice(0,2).map(w=>w[0].toUpperCase()).join(''); }
@@ -101,7 +115,7 @@ function devDaysClient(t){
 function progressPct(t){
   if(t.status==='ended') return 100;
   if(t.status!=='doing'||!t.start_date) return 0;
-  const dur=Math.max(1,Math.ceil(Number(t.scope_weeks)*7));
+  const dur=Math.max(1,weeksToDays(t.scope_weeks));
   const elapsed=(today()-new Date(t.start_date))/DAY_MS;
   return Math.max(0,Math.min(100,Math.round(elapsed/dur*100)));
 }
@@ -109,8 +123,8 @@ function progressPct(t){
 // ----- ventanas de tareas prioritarias (cortan/parten el trabajo) -----
 let WINDOWS = [];
 function priorityFullDays(t){
-  let m=Math.ceil(Number(t.scope_weeks)*7);
-  for(const s of (t.subtasks||[])) m=Math.max(m, Math.round(Number(s.offset_weeks)*7)+Math.ceil(Number(s.scope_weeks)*7));
+  let m=weeksToDays(t.scope_weeks);
+  for(const s of (t.subtasks||[])) m=Math.max(m, Math.round(Number(s.offset_weeks)*7)+weeksToDays(s.scope_weeks));
   return m;
 }
 // Cada ventana lleva el conjunto de dominios (horizontales) que la roja afecta:
@@ -121,13 +135,13 @@ function priorityWindows(){
     if (!t.is_priority || t.status === 'ended' || !t.start_date) continue;
     if (t.domain_id) {
       const s = new Date(t.start_date);
-      const e = addDays(s, Math.ceil(Number(t.scope_weeks)*7));
+      const e = addDays(s, weeksToDays(t.scope_weeks));
       list.push({ s, e, domains: new Set([t.domain_id]) });
     }
     for (const sub of (t.subtasks || [])) {
       if (sub.domain_id) {
         const s = addDays(new Date(t.start_date), Math.round(Number(sub.offset_weeks)*7));
-        const e = addDays(s, Math.ceil(Number(sub.scope_weeks)*7));
+        const e = addDays(s, weeksToDays(sub.scope_weeks));
         list.push({ s, e, domains: new Set([sub.domain_id]) });
       }
     }
@@ -189,7 +203,7 @@ function computeGeom(){
     const laneEndsForDom = []; // each entry is the end-date of the last task placed in that lane
     for(const t of tasks){
       const tStart = new Date(t.start_date);
-      const tEnd = addDays(tStart, Math.ceil(Number(t.scope_weeks)*7));
+      const tEnd = addDays(tStart, weeksToDays(t.scope_weeks));
       let placed = false;
       for(let i=0; i<laneEndsForDom.length; i++){
         if(tStart >= laneEndsForDom[i]){
@@ -215,7 +229,7 @@ function computeGeom(){
     for(const s of (t.subtasks||[])){
       if(!s.domain_id) continue;
       const start=addDays(new Date(t.start_date), Math.round(Number(s.offset_weeks)*7));
-      const dur=Math.ceil(Number(s.scope_weeks)*7);
+      const dur=weeksToDays(s.scope_weeks);
       const wins=WINDOWS.filter(w=>w.domains.has(s.domain_id));
       const segs=segmentize(start, dur, wins);
       subItems.push({domain:s.domain_id, start, end:segs[segs.length-1][1], key:t.id+'-'+s.id});
@@ -434,10 +448,7 @@ function attachDomainDrag(el, d, index) {
     });
     
     items.sort((a, b) => a.top - b.top);
-    
-    for (let k = 0; k < items.length; k++) {
-      await api.send('/api/domains/' + items[k].id, 'PUT', { position: k });
-    }
+    await api.send('/api/domains/reorder', 'POST', { order: items.map(it => it.id) });
     await loadAll();
   });
 }
@@ -560,16 +571,6 @@ function renderCanvas(canvasW){
   }
 }
 
-function blockBase(t){
-  const el=document.createElement('div');
-  el.className='block '+t.status;
-  el.style.left=px(t.start_date)+'px';
-  el.style.width=widthFor(Number(t.scope_weeks))+'px';
-  el.style.background=t.color;
-  el.dataset.id=t.id;
-  return el;
-}
-
 // Dibuja una tarea (o subtarea) como segmentos partidos por las prioritarias
 function drawSegments(c, t, baseStart, durNum, top, opts){
   // solo cortan las prioritarias que afectan a ESTA horizontal (dominio)
@@ -615,7 +616,7 @@ function drawSegments(c, t, baseStart, durNum, top, opts){
 function renderTaskBlock(c, t){
   const packedLane = state.geom.computedLanes[t.id] !== undefined ? state.geom.computedLanes[t.id] : (t.lane||0);
   const top=state.geom.bandTop[t.domain_id]+ packedLane*ROW_H + 8;
-  const durNum=Math.ceil(Number(t.scope_weeks)*7);
+  const durNum=weeksToDays(t.scope_weeks);
   drawSegments(c, t, new Date(t.start_date), durNum, top, {sub:false, domain:t.domain_id});
 
   // subrutinas cross-dominio (también se parten si las cruza una prioritaria)
@@ -625,11 +626,11 @@ function renderTaskBlock(c, t){
     const projRows=state.geom.projRows[s.domain_id]||1;
     const subLane=state.geom.subLanes[t.id+'-'+s.id]||0;
     const subTop=state.geom.bandTop[s.domain_id]+(projRows+subLane)*ROW_H+8; // SIEMPRE debajo de los proyectos
-    const subDur=Math.ceil(Number(s.scope_weeks)*7);
+    const subDur=weeksToDays(s.scope_weeks);
     drawSegments(c, t, subStart, subDur, subTop, {sub:true, label:s.name||t.name, domain:s.domain_id, subObj:s});
     // conector vertical situado en el INICIO de la subrutina (no cruza la prioritaria)
     const line=document.createElement('div'); line.className='dep-line';
-    const y1=state.geom.bandTop[t.domain_id]+(t.lane||0)*ROW_H+ROW_H/2;
+    const y1=state.geom.bandTop[t.domain_id]+packedLane*ROW_H+ROW_H/2;
     const y2=subTop+(ROW_H-16)/2;
     line.style.left=px(subStart)+'px';
     line.style.top=Math.min(y1,y2)+'px';
@@ -645,12 +646,12 @@ function renderPriorityBlock(c, t){
     const intervals = [];
     if (t.domain_id === d.id) {
       const s = new Date(t.start_date);
-      intervals.push({ s, e: addDays(s, Math.ceil(Number(t.scope_weeks)*7)) });
+      intervals.push({ s, e: addDays(s, weeksToDays(t.scope_weeks)) });
     }
     for (const sub of (t.subtasks || [])) {
       if (sub.domain_id === d.id) {
         const s = addDays(new Date(t.start_date), Math.round(Number(sub.offset_weeks)*7));
-        intervals.push({ s, e: addDays(s, Math.ceil(Number(sub.scope_weeks)*7)) });
+        intervals.push({ s, e: addDays(s, weeksToDays(sub.scope_weeks)) });
       }
     }
     if (intervals.length === 0) continue;
@@ -887,6 +888,16 @@ $('#addSub').onclick=()=>addSubRow(null);
 $('#btnNew').onclick=()=>openNew(false);
 $('#btnPriority').onclick=()=>openNew(true);
 
+// Cerrar modales con clic en el fondo (no en el contenido) y con la tecla Esc.
+document.querySelectorAll('.modal-bg').forEach(bg=>{
+  bg.addEventListener('mousedown', e=>{ if(e.target===bg) bg.hidden=true; });
+});
+document.addEventListener('keydown', e=>{
+  if(e.key!=='Escape') return;
+  document.querySelectorAll('.modal-bg:not([hidden])').forEach(bg=>bg.hidden=true);
+  const lg=$('#legend'); if(lg && !lg.hidden) lg.hidden=true;
+});
+
 // =================== ZOOM ===================
 document.querySelectorAll('.zoom button').forEach(b=>{
   b.onclick=()=>{ document.querySelectorAll('.zoom button').forEach(x=>x.classList.remove('active')); b.classList.add('active'); state.zoom=b.dataset.zoom; renderBoard(); };
@@ -962,7 +973,7 @@ async function saveDomain(id,patch){ await api.send('/api/domains/'+id,'PUT',pat
 async function moveDomain(i,dir){
   const arr=[...state.domains]; const j=i+dir; if(j<0||j>=arr.length) return;
   [arr[i],arr[j]]=[arr[j],arr[i]];
-  for(let k=0;k<arr.length;k++) await api.send('/api/domains/'+arr[k].id,'PUT',{position:k});
+  await api.send('/api/domains/reorder','POST',{order:arr.map(d=>d.id)});
   await reloadDomains();
 }
 async function delDomain(d){
@@ -1272,7 +1283,13 @@ function adjustBlockTexts(){
   });
 }
 
-$('#board').addEventListener('scroll', adjustBlockTexts);
+// Throttle con requestAnimationFrame: evita layout thrashing al hacer scroll.
+let _adjustRAF = null;
+function scheduleAdjust(){
+  if (_adjustRAF) return;
+  _adjustRAF = requestAnimationFrame(() => { _adjustRAF = null; adjustBlockTexts(); });
+}
+$('#board').addEventListener('scroll', scheduleAdjust, { passive: true });
 
 function updateEndFromStartAndScope() {
   const start = $('#f_start').value;
@@ -1287,8 +1304,9 @@ function updateScopeFromStartAndEnd() {
   const end = $('#f_end').value;
   if (start && end) {
     const diffDays = dayDiff(end, start);
-    const scope = Math.max(0.5, +(diffDays / 7).toFixed(1));
-    $('#f_scope').value = scope;
+    // Si el fin es anterior o igual al inicio, lo recolocamos según el alcance actual.
+    if (diffDays <= 0) { $('#f_end').value = getEndDateStr(start, $('#f_scope').value); return; }
+    $('#f_scope').value = daysToWeeks(diffDays);
   }
 }
 
@@ -1297,4 +1315,5 @@ $('#f_scope').addEventListener('input', updateEndFromStartAndScope);
 $('#f_scope').addEventListener('change', updateEndFromStartAndScope);
 $('#f_end').addEventListener('change', updateScopeFromStartAndEnd);
 
+// Arranque de la aplicación
 loadAll();
