@@ -6,6 +6,22 @@ const { Pool } = require('pg');
 
 const app = express();
 app.use(express.json());
+
+// Auth básica OPCIONAL: solo se activa si defines APP_USER y APP_PASS en el entorno.
+// Si no están definidas, no cambia nada (comportamiento actual).
+const APP_USER = process.env.APP_USER, APP_PASS = process.env.APP_PASS;
+if (APP_USER && APP_PASS) {
+  app.use((req, res, next) => {
+    const hdr = req.headers.authorization || '';
+    const [scheme, encoded] = hdr.split(' ');
+    if (scheme === 'Basic' && encoded) {
+      const [u, p] = Buffer.from(encoded, 'base64').toString().split(':');
+      if (u === APP_USER && p === APP_PASS) return next();
+    }
+    res.set('WWW-Authenticate', 'Basic realm="ProjecTyzer"').status(401).end('Autenticación requerida');
+  });
+}
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = process.env.PORT || 3016;
@@ -51,6 +67,18 @@ const isoDate = (d) => new Date(d).toISOString().slice(0, 10);
 const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
 // Misma convención que el front (public/app.js: weeksToDays) -> evita 1 día de descuadre.
 const durDays = (weeks) => Math.round(Number(weeks) * 7);
+
+// ---- validación de entrada ----
+const VALID_STATUS = ['backlog', 'doing', 'ended'];
+function validateTaskInput(body) {
+  if (body.status !== undefined && !VALID_STATUS.includes(body.status))
+    return `status inválido (debe ser uno de: ${VALID_STATUS.join(', ')})`;
+  if (body.scope_weeks !== undefined) {
+    const n = Number(body.scope_weeks);
+    if (!Number.isFinite(n) || n <= 0) return 'scope_weeks debe ser un número mayor que 0';
+  }
+  return null;
+}
 
 // ====================== DOMINIOS ======================
 app.get('/api/domains', wrap(async (req, res) => {
@@ -114,6 +142,8 @@ app.get('/api/tasks', wrap(async (req, res) => {
 }));
 
 app.post('/api/tasks', wrap(async (req, res) => {
+  const verr = validateTaskInput(req.body);
+  if (verr) return res.status(400).json({ error: verr });
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -145,7 +175,9 @@ app.post('/api/tasks', wrap(async (req, res) => {
 
 app.put('/api/tasks/:id', wrap(async (req, res) => {
   const f = req.body;
-  
+  const verr = validateTaskInput(f);
+  if (verr) return res.status(400).json({ error: verr });
+
   // Obtener la tarea actual
   const { rows: current } = await pool.query('SELECT * FROM tasks WHERE id = $1', [req.params.id]);
   if (current.length === 0) {
@@ -233,6 +265,46 @@ app.put('/api/subtasks/:id', wrap(async (req, res) => {
 app.delete('/api/subtasks/:id', wrap(async (req, res) => {
   await pool.query('DELETE FROM subtasks WHERE id=$1', [req.params.id]);
   res.json({ ok: true });
+}));
+
+// Upsert atómico de TODAS las subtareas de una tarea (1 transacción / 1 round-trip):
+// actualiza las que traen id, crea las nuevas y borra las que ya no están en el payload.
+app.put('/api/tasks/:id/subtasks', wrap(async (req, res) => {
+  const parentId = req.params.id;
+  const items = Array.isArray(req.body) ? req.body : [];
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: existing } = await client.query('SELECT id FROM subtasks WHERE parent_task_id=$1', [parentId]);
+    const keep = new Set();
+    for (const it of items) {
+      const dom = it.domain_id || null;
+      const name = it.name || '';
+      const scope = it.scope_weeks != null ? it.scope_weeks : 1;
+      const off = it.offset_weeks != null ? it.offset_weeks : 0;
+      if (it.id) {
+        await client.query(
+          `UPDATE subtasks SET domain_id=$2, name=$3, scope_weeks=$4, offset_weeks=$5
+             WHERE id=$1 AND parent_task_id=$6`,
+          [it.id, dom, name, scope, off, parentId]
+        );
+        keep.add(Number(it.id));
+      } else {
+        const { rows } = await client.query(
+          `INSERT INTO subtasks (parent_task_id, domain_id, name, scope_weeks, offset_weeks)
+             VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+          [parentId, dom, name, scope, off]
+        );
+        keep.add(Number(rows[0].id));
+      }
+    }
+    const toDelete = existing.map(r => Number(r.id)).filter(id => !keep.has(id));
+    if (toDelete.length) await client.query('DELETE FROM subtasks WHERE id = ANY($1::int[])', [toDelete]);
+    await recomputeSchedule(client);
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (e) { await client.query('ROLLBACK'); throw e; }
+  finally { client.release(); }
 }));
 
 // ====================== LOGICA DE PRIORIDAD (recalculo idempotente) ======================

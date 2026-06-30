@@ -23,6 +23,37 @@ const api = {
   async get(u){ return (await fetch(u)).json(); },
   async send(u, m, b){ return (await fetch(u, {method:m, headers:{'Content-Type':'application/json'}, body: b?JSON.stringify(b):undefined})).json(); },
 };
+
+// =================== NOTIFICACIONES (toast) Y DIÁLOGO DE CONFIRMACIÓN ===================
+function toast(msg, type='info', ms=3800){
+  let cont=document.getElementById('toastCont');
+  if(!cont){ cont=document.createElement('div'); cont.id='toastCont'; cont.className='toast-cont'; document.body.appendChild(cont); }
+  const el=document.createElement('div'); el.className='toast toast-'+type; el.textContent=msg;
+  cont.appendChild(el);
+  requestAnimationFrame(()=>el.classList.add('show'));
+  const kill=()=>{ el.classList.remove('show'); setTimeout(()=>el.remove(), 250); };
+  el.addEventListener('click', kill);
+  setTimeout(kill, ms);
+}
+function confirmDialog(message, okLabel='Aceptar'){
+  return new Promise(resolve=>{
+    const bg=document.createElement('div'); bg.className='modal-bg';
+    bg.innerHTML=`<div class="modal" style="width:380px">
+      <p style="margin:0 0 16px">${esc(message)}</p>
+      <div class="modal-foot"><span class="spacer"></span>
+        <button class="btn" data-act="cancel">Cancelar</button>
+        <button class="btn btn-danger" data-act="ok">${esc(okLabel)}</button>
+      </div></div>`;
+    document.body.appendChild(bg);
+    const done=(v)=>{ bg.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
+    const onKey=(e)=>{ if(e.key==='Escape') done(false); else if(e.key==='Enter') done(true); };
+    bg.addEventListener('mousedown', e=>{ if(e.target===bg) done(false); });
+    bg.querySelector('[data-act=cancel]').onclick=()=>done(false);
+    bg.querySelector('[data-act=ok]').onclick=()=>done(true);
+    document.addEventListener('keydown', onKey);
+    bg.querySelector('[data-act=ok]').focus();
+  });
+}
 // --- Fechas: SIEMPRE en hora LOCAL para evitar desfases de ±1 día (UTC vs local) ---
 const pad2 = (n) => String(n).padStart(2,'0');
 const iso = (d) => { const x=new Date(d); return `${x.getFullYear()}-${pad2(x.getMonth()+1)}-${pad2(x.getDate())}`; };
@@ -45,13 +76,23 @@ const getEndDateStr = (startStr, scopeWeeks) => {
 };
 
 // =================== LOAD ===================
+let firstLoadDone = false;
 async function loadAll(){
-  state.domains = await api.get('/api/domains');
-  state.tasks = await api.get('/api/tasks');
-  computeViewStart();
-  renderBacklog();
-  renderBoard();
-  renderSummary();
+  const ov = $('#loadingOverlay');
+  if(ov && !firstLoadDone) ov.hidden = false;   // overlay solo en la carga inicial (evita parpadeos)
+  try {
+    state.domains = await api.get('/api/domains');
+    state.tasks = await api.get('/api/tasks');
+    computeViewStart();
+    renderBacklog();
+    renderBoard();
+    renderSummary();
+  } catch(err){
+    toast('No se pudieron cargar los datos: ' + err.message, 'error');
+  } finally {
+    if(ov) ov.hidden = true;
+    firstLoadDone = true;
+  }
 }
 
 // =================== RESUMEN (panel inferior) ===================
@@ -856,33 +897,39 @@ $('#taskForm').addEventListener('submit', async (e)=>{
     color: priority?RED:($('#colorRow').dataset.color||null),
   };
   let taskId;
-  if(editing){
-    await api.send('/api/tasks/'+editing.id,'PUT',body);
-    taskId=editing.id;
-    // resync subtareas: borrar y recrear (simple y robusto)
-    for(const s of (editing.subtasks||[])) await api.send('/api/subtasks/'+s.id,'DELETE');
-  } else {
-    if(!body.start_date) body.start_date=iso(today());
-    body.baseline_start=body.start_date;
-    const r=await api.send('/api/tasks','POST',body);
-    taskId=r.task.id;
-  }
-  // crear subtareas desde el formulario (el desfase se calcula desde la fecha de inicio)
-  const parentStart = body.start_date || iso(today());
-  for(const row of $('#subsList').querySelectorAll('.sub-row')){
-    const subStart = row.querySelector('.s_start').value || parentStart;
-    const offsetW = (new Date(subStart) - new Date(parentStart)) / (7*86400000);
-    await api.send('/api/tasks/'+taskId+'/subtasks','POST',{
-      domain_id:+row.querySelector('.s_dom').value,
-      name:row.querySelector('.s_name').value.trim(),
-      scope_weeks:+row.querySelector('.s_scope').value,
-      offset_weeks:offsetW,
+  try {
+    if(editing){
+      await api.send('/api/tasks/'+editing.id,'PUT',body);
+      taskId=editing.id;
+    } else {
+      if(!body.start_date) body.start_date=iso(today());
+      body.baseline_start=body.start_date;
+      const r=await api.send('/api/tasks','POST',body);
+      taskId=r.task.id;
+    }
+    // Sincronizar subtareas en UNA sola petición (upsert de existentes/nuevas + borrado de las quitadas).
+    const parentStart = body.start_date || iso(today());
+    const subs = [...$('#subsList').querySelectorAll('.sub-row')].map(row=>{
+      const subStart = row.querySelector('.s_start').value || parentStart;
+      const item = {
+        domain_id:+row.querySelector('.s_dom').value,
+        name:row.querySelector('.s_name').value.trim(),
+        scope_weeks:+row.querySelector('.s_scope').value,
+        offset_weeks: dayDiff(subStart, parentStart) / 7,
+      };
+      if(row.dataset.id) item.id=+row.dataset.id;
+      return item;
     });
-  }
-  $('#modal').hidden=true;
-  await loadAll();
+    await api.send('/api/tasks/'+taskId+'/subtasks','PUT',subs);
+    $('#modal').hidden=true;
+    await loadAll();
+  } catch(err){ toast('No se pudo guardar: '+err.message, 'error'); }
 });
-$('#btnDelete').onclick=async()=>{ if(editing && confirm('¿Eliminar esta tarea?')){ await api.send('/api/tasks/'+editing.id,'DELETE'); $('#modal').hidden=true; await loadAll(); } };
+$('#btnDelete').onclick=async()=>{
+  if(editing && await confirmDialog('¿Eliminar esta tarea?', 'Eliminar')){
+    await api.send('/api/tasks/'+editing.id,'DELETE'); $('#modal').hidden=true; await loadAll();
+  }
+};
 $('#btnCancel').onclick=()=>$('#modal').hidden=true;
 $('#addSub').onclick=()=>addSubRow(null);
 $('#btnNew').onclick=()=>openNew(false);
@@ -977,7 +1024,7 @@ async function moveDomain(i,dir){
   await reloadDomains();
 }
 async function delDomain(d){
-  if(!confirm(`¿Eliminar el dominio "${d.name}"? Sus tareas volverán al backlog.`)) return;
+  if(!(await confirmDialog(`¿Eliminar el dominio "${d.name}"? Sus tareas volverán al backlog.`, 'Eliminar'))) return;
   await api.send('/api/domains/'+d.id,'DELETE'); await reloadDomains();
 }
 $('#btnLegend').onclick=()=>{ const l=$('#legend'); l.hidden=!l.hidden; };
@@ -1014,7 +1061,7 @@ $('#csvFileInput').onchange = (e) => {
       const text = evt.target.result;
       const rows = parseCSV(text);
       if (rows.length < 2) {
-        alert('El archivo CSV está vacío o no contiene suficientes filas.');
+        toast('El archivo CSV está vacío o no contiene suficientes filas.', 'error');
         return;
       }
 
@@ -1038,7 +1085,7 @@ $('#csvFileInput').onchange = (e) => {
       });
 
       if (idIdx === -1 || titleIndices.length === 0) {
-        alert('El archivo CSV debe contener al menos las columnas "ID" y "Título" / "Title".');
+        toast('El archivo CSV debe contener al menos las columnas "ID" y "Título" / "Title".', 'error');
         return;
       }
 
@@ -1163,13 +1210,13 @@ $('#csvFileInput').onchange = (e) => {
       }
 
       if (parsedDevOpsTasks.length === 0) {
-        alert('No se encontraron tareas con tipo Epic, Feature o Risk en el CSV.');
+        toast('No se encontraron tareas con tipo Epic, Feature o Risk en el CSV.', 'error');
         return;
       }
 
       $('#importModal').hidden = false;
     } catch (err) {
-      alert('Error al procesar el archivo CSV: ' + err.message);
+      toast('Error al procesar el archivo CSV: ' + err.message, 'error');
     }
   };
   reader.readAsText(file);
@@ -1206,11 +1253,11 @@ $('#confirmImport').onclick = async () => {
 
   try {
     const res = await api.send('/api/tasks/sync-csv', 'POST', parsedDevOpsTasks);
-    alert(res.message || 'Sincronización finalizada.');
+    toast(res.message || 'Sincronización finalizada.', 'success');
     $('#importModal').hidden = true;
     await loadAll();
   } catch (err) {
-    alert('Error al guardar la sincronización: ' + err.message);
+    toast('Error al guardar la sincronización: ' + err.message, 'error');
   } finally {
     btn.textContent = 'Confirmar Sincronización';
     btn.disabled = false;
