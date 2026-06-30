@@ -27,6 +27,12 @@ const iso = (d) => new Date(d).toISOString().slice(0,10);
 const today = () => { const d=new Date(); d.setHours(0,0,0,0); return d; };
 const addDays = (d,n) => { const x=new Date(d); x.setDate(x.getDate()+n); return x; };
 const dayDiff = (a,b) => Math.round((new Date(a)-new Date(b))/DAY_MS);
+const getEndDateStr = (startStr, scopeWeeks) => {
+  if (!startStr) return '';
+  const d = new Date(startStr);
+  const days = Math.ceil(Number(scopeWeeks) * 7);
+  return iso(addDays(d, days));
+};
 
 // =================== LOAD ===================
 async function loadAll(){
@@ -732,7 +738,11 @@ function openNew(priority){
   $('#modalTitle').textContent= priority?'⚡ Nueva tarea prioritaria':'Nuevo proyecto';
   $('#f_id').value=''; $('#f_priority').value=priority?'true':'false';
   $('#f_name').value=''; $('#f_owner').value=''; $('#f_desc').value='';
-  $('#f_scope').value=priority?1:2; $('#f_start').value=iso(today());
+  const defaultScope = priority?1:2;
+  $('#f_scope').value=defaultScope;
+  const start = iso(today());
+  $('#f_start').value=start;
+  $('#f_end').value=getEndDateStr(start, defaultScope);
   $('#f_status').value=priority?'doing':'backlog';
   fillDomains($('#f_domain'), state.domains[0]?.id);
   $('#f_domain_wrap').style.display= priority?'none':'';
@@ -746,7 +756,10 @@ function openTask(t){
   $('#modalTitle').textContent= t.is_priority?'⚡ Editar prioritaria':'Editar proyecto';
   $('#f_id').value=t.id; $('#f_priority').value=t.is_priority?'true':'false';
   $('#f_name').value=t.name; $('#f_owner').value=t.owner||''; $('#f_desc').value=t.description||'';
-  $('#f_scope').value=t.scope_weeks; $('#f_start').value=t.start_date?iso(t.start_date):iso(today());
+  $('#f_scope').value=t.scope_weeks;
+  const start = t.start_date ? iso(t.start_date) : iso(today());
+  $('#f_start').value=start;
+  $('#f_end').value=getEndDateStr(start, t.scope_weeks);
   $('#f_status').value=t.status;
   fillDomains($('#f_domain'), t.domain_id);
   $('#f_domain_wrap').style.display= t.is_priority?'none':'';
@@ -1199,5 +1212,28 @@ function adjustBlockTexts(){
 }
 
 $('#board').addEventListener('scroll', adjustBlockTexts);
+
+function updateEndFromStartAndScope() {
+  const start = $('#f_start').value;
+  const scope = parseFloat($('#f_scope').value) || 0.5;
+  if (start) {
+    $('#f_end').value = getEndDateStr(start, scope);
+  }
+}
+
+function updateScopeFromStartAndEnd() {
+  const start = $('#f_start').value;
+  const end = $('#f_end').value;
+  if (start && end) {
+    const diffDays = dayDiff(end, start);
+    const scope = Math.max(0.5, +(diffDays / 7).toFixed(1));
+    $('#f_scope').value = scope;
+  }
+}
+
+$('#f_start').addEventListener('change', updateEndFromStartAndScope);
+$('#f_scope').addEventListener('input', updateEndFromStartAndScope);
+$('#f_scope').addEventListener('change', updateEndFromStartAndScope);
+$('#f_end').addEventListener('change', updateScopeFromStartAndEnd);
 
 loadAll();
