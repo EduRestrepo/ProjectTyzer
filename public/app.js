@@ -275,13 +275,60 @@ function renderAxis(canvasW){
   const step = z.tick;
   const fmt = (d)=>d.toLocaleDateString('es',{day:'2-digit',month:'short'});
 
+  const qColors = ['#0ea5e9', '#10b981', '#f59e0b', '#8b5cf6'];
+  const getQColor = (date) => qColors[Math.floor(date.getMonth() / 3)];
+
   function tick(date, major, label, sub){
     const x = px(date);
+    const color = getQColor(date);
     const t = document.createElement('div');
     t.className='tick'+(major?' major':''); t.style.left=x+'px';
     axis.appendChild(t);
-    if(label){ const l=document.createElement('div'); l.className='tick-label'; l.style.left=x+'px'; l.textContent=label; axis.appendChild(l);}
-    if(sub){ const s=document.createElement('div'); s.className='tick-sub'; s.style.left=x+'px'; s.textContent=sub; axis.appendChild(s);}
+    if(label){
+      const l=document.createElement('div');
+      l.className='tick-label';
+      l.style.left=x+'px';
+      l.style.color=color;
+      l.textContent=label;
+      axis.appendChild(l);
+    }
+    if(sub){
+      const s=document.createElement('div');
+      s.className='tick-sub';
+      s.style.left=x+'px';
+      s.style.color=color + 'cc';
+      s.textContent=sub;
+      axis.appendChild(s);
+    }
+  }
+
+  // Dibujar bandas de Qs arriba
+  let qCur = new Date(state.viewStart);
+  qCur.setHours(0,0,0,0);
+  let currentQ = Math.floor(qCur.getMonth() / 3);
+  qCur = new Date(qCur.getFullYear(), currentQ * 3, 1);
+  const qNames = ['Q1', 'Q2', 'Q3', 'Q4'];
+  while (qCur < state.viewEnd) {
+    const qStart = new Date(Math.max(state.viewStart, qCur));
+    const nextQDate = new Date(qCur.getFullYear(), qCur.getMonth() + 3, 1);
+    const qEnd = new Date(Math.min(state.viewEnd, nextQDate));
+    const xStart = px(qStart);
+    const xEnd = px(qEnd);
+    const width = xEnd - xStart;
+    if (width > 20) {
+      const qIdx = Math.floor(qCur.getMonth() / 3);
+      const color = qColors[qIdx];
+      const qDiv = document.createElement('div');
+      qDiv.className = 'q-header-band';
+      qDiv.style.left = xStart + 'px';
+      qDiv.style.width = width + 'px';
+      qDiv.style.backgroundColor = color + '15';
+      qDiv.style.borderTop = `3px solid ${color}`;
+      qDiv.style.color = color;
+      qDiv.innerHTML = `<span class="q-label">${qNames[qIdx]} ${qCur.getFullYear()}</span>`;
+      axis.appendChild(qDiv);
+    }
+    qCur = nextQDate;
   }
 
   // alinear inicio
@@ -328,6 +375,13 @@ function renderRail(){
     it.title='Arrastra para reordenar, haz clic para gestionar';
     attachDomainDrag(it, d, i);
     rail.appendChild(it);
+
+    if (i < state.domains.length - 1) {
+      const sep = document.createElement('div');
+      sep.className = 'rail-separator';
+      sep.style.top = (state.geom.bandTop[d.id] + state.geom.bandH[d.id]) + 'px';
+      rail.appendChild(sep);
+    }
   });
 }
 
@@ -406,6 +460,14 @@ function renderCanvas(canvasW){
     const hexA2 = Math.round(alpha*0.3*255).toString(16).padStart(2,'0');
     b.style.background=`linear-gradient(90deg, ${col}${hexA} 0%, ${col}${hexA2} 100%)`;
     c.appendChild(b);
+
+    if (di < state.domains.length - 1) {
+      const sep = document.createElement('div');
+      sep.className = 'lane-separator';
+      sep.style.top = (state.geom.bandTop[d.id] + state.geom.bandH[d.id]) + 'px';
+      sep.style.width = canvasW + 'px';
+      c.appendChild(sep);
+    }
   }
   // bandas de fin de semana (sábado y domingo) — solo en escalas finas
   const pxDay=ZOOMS[state.zoom].pxDay;

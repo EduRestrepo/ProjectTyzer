@@ -70,14 +70,18 @@ table.summary-table tbody tr:hover{background:var(--panel2)}
 
 .tick{position:absolute;top:0;bottom:0;border-left:1px solid var(--line);opacity:.5}
 .tick.major{opacity:.9;border-left-color:#475569}
-.tick-label{position:absolute;top:6px;font-size:11px;color:var(--muted);white-space:nowrap;padding-left:5px}
-.tick-sub{position:absolute;bottom:5px;font-size:10px;color:#64748b;padding-left:5px}
+.tick-label{position:absolute;top:20px;font-size:11px;font-weight:700;color:var(--muted);white-space:nowrap;padding-left:5px}
+.tick-sub{position:absolute;bottom:4px;font-size:10px;color:#64748b;padding-left:5px}
+.q-header-band{position:absolute;top:0;height:16px;font-size:9px;font-weight:800;display:flex;align-items:center;box-sizing:border-box;border-right:1px dashed rgba(148,163,184,.15)}
+.q-label{padding-left:6px;text-transform:uppercase;letter-spacing:0.5px}
 .today-line{position:absolute;top:0;bottom:0;border-left:2px dashed #22d3ee;z-index:5;opacity:.85}
 .today-tag{position:absolute;top:2px;transform:translateX(-50%);background:#22d3ee;color:#0f172a;font-size:10px;font-weight:700;padding:1px 6px;border-radius:6px;z-index:9;pointer-events:none}
 
 .weekend-band{position:absolute;top:0;background:rgba(99,102,241,.10);pointer-events:none}
 .lane-band{position:absolute;left:0;right:0;border:1px solid rgba(148,163,184,.15);border-left:4px solid var(--band-color, #64748b);border-radius:0 8px 8px 0;transition:background .2s}
 .lane-band:nth-child(even){}
+.lane-separator{position:absolute;left:0;height:16px;background:rgba(255,255,255,.04);border-top:1px solid rgba(255,255,255,.08);border-bottom:1px solid rgba(255,255,255,.08);pointer-events:none}
+.rail-separator{position:absolute;left:0;right:0;height:16px;background:rgba(255,255,255,.04);border-top:1px solid rgba(255,255,255,.08);border-bottom:1px solid rgba(255,255,255,.08);pointer-events:none}
 .rail-item{position:absolute;left:0;right:0;display:flex;align-items:center;gap:8px;padding:0 12px;border:1px solid rgba(148,163,184,.15);border-left:4px solid var(--rail-color, #64748b);border-radius:8px 0 0 8px;font-weight:600;font-size:13px;user-select:none;touch-action:none}
 .rail-dot{width:12px;height:12px;border-radius:4px;flex:none;box-shadow:0 0 6px rgba(255,255,255,.15)}
 
