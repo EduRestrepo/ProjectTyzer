@@ -301,7 +301,7 @@ function isoWeek(d){ const x=new Date(d); x.setHours(0,0,0,0); x.setDate(x.getDa
 
 function renderRail(){
   const rail = $('#rail'); rail.innerHTML='';
-  for(const d of state.domains){
+  state.domains.forEach((d, i)=>{
     const it=document.createElement('div');
     it.className='rail-item';
     it.style.top=state.geom.bandTop[d.id]+'px';
@@ -310,10 +310,67 @@ function renderRail(){
     it.style.setProperty('--rail-color', col);
     it.style.background=`linear-gradient(90deg, ${col}1a 0%, transparent 100%)`;
     it.innerHTML=`<span class="rail-dot" style="background:${d.color}"></span>${esc(d.name)}`;
-    it.title='Clic para gestionar dominios';
-    it.onclick=openDomains;
+    it.title='Arrastra para reordenar, haz clic para gestionar';
+    attachDomainDrag(it, d, i);
     rail.appendChild(it);
-  }
+  });
+}
+
+function attachDomainDrag(el, d, index) {
+  let sy, moved = false, startTop, dragging = false;
+  el.style.cursor = 'grab';
+  
+  el.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    dragging = true;
+    moved = false;
+    sy = e.clientY;
+    startTop = parseFloat(el.style.top) || 0;
+    el.setPointerCapture(e.pointerId);
+    el.style.zIndex = '100';
+    el.style.cursor = 'grabbing';
+    el.style.boxShadow = '0 8px 24px rgba(0,0,0,0.5)';
+    el.style.opacity = '0.9';
+  });
+  
+  el.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const dy = e.clientY - sy;
+    if (Math.abs(dy) > 4) moved = true;
+    if (moved) {
+      el.style.top = (startTop + dy) + 'px';
+    }
+  });
+  
+  el.addEventListener('pointerup', async (e) => {
+    if (!dragging) return;
+    dragging = false;
+    el.style.zIndex = '';
+    el.style.cursor = 'grab';
+    el.style.boxShadow = '';
+    el.style.opacity = '';
+    
+    if (!moved) {
+      openDomains();
+      return;
+    }
+    
+    const finalTop = parseFloat(el.style.top) || 0;
+    const items = state.domains.map((dom) => {
+      let tempTop = state.geom.bandTop[dom.id];
+      if (dom.id === d.id) {
+        tempTop = finalTop;
+      }
+      return { id: dom.id, top: tempTop };
+    });
+    
+    items.sort((a, b) => a.top - b.top);
+    
+    for (let k = 0; k < items.length; k++) {
+      await api.send('/api/domains/' + items[k].id, 'PUT', { position: k });
+    }
+    await loadAll();
+  });
 }
 
 function renderCanvas(canvasW){
