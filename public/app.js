@@ -16,6 +16,7 @@ const ROW_H = 56;
 const DAY_MS = 86400000;
 
 const state = { domains: [], tasks: [], zoom: 'week', viewStart: null, geom: {}, boardFilter: { doing: true, ended: true } };
+let initialScrollDone = false;
 
 const $ = (s) => document.querySelector(s);
 const api = {
@@ -250,6 +251,14 @@ function renderBoard(){
   renderAxis(canvasW);
   renderRail();
   renderCanvas(canvasW);
+
+  if (!initialScrollDone) {
+    const todayPx = px(today());
+    const oneWeekPx = 7 * z.pxDay;
+    $('#board').scrollLeft = Math.max(0, todayPx - oneWeekPx);
+    initialScrollDone = true;
+  }
+  adjustBlockTexts();
 }
 
 function renderAxis(canvasW){
@@ -511,22 +520,24 @@ function drawSegments(c, t, baseStart, durNum, top, opts){
     el.style.background=t.color; el.dataset.id=t.id;
     if(opts.sub){
       el.innerHTML = i===0
-        ? `<div class="bn">↳ ${esc(opts.label)}</div><div class="bo">dep. de ${esc(t.name)}</div>`
-        : `<div class="bn">↪ continúa</div>`;
+        ? `<div class="block-text"><div class="bn">↳ ${esc(opts.label)}</div><div class="bo">dep. de ${esc(t.name)}</div></div>`
+        : `<div class="block-text"><div class="bn">↪ continúa</div></div>`;
       if(i===0 && opts.subObj) attachSubBlock(el, t, opts.subObj); // arrastrable en el tiempo
       else el.addEventListener('click', ()=>openTask(t));
     } else {
       if(i===0){
         const dev=devDaysClient(t), ini=initials(t.owner), prog=progressPct(t);
         el.title=`${t.name}\nDueño: ${t.owner||'—'}\nDominio: ${domName(t.domain_id)}\nInicio: ${iso(t.start_date)} · ${t.scope_weeks} sem\nEstado: ${t.status}${dev>0?`\nDesviación: +${dev} d`:''}`;
-        el.innerHTML=`<div class="bn">${ini?`<span class="bchip">${esc(ini)}</span>`:''}${esc(t.name)}</div>`
+        el.innerHTML=`<div class="block-text">`
+          +`<div class="bn">${ini?`<span class="bchip">${esc(ini)}</span>`:''}${esc(t.name)}</div>`
           +`<div class="bo">${esc(t.owner||'—')}</div>`
+          +`</div>`
           +`<span class="scope-tag">${t.scope_weeks}s</span>`
           +(dev>0?`<span class="dev-badge">+${dev}d</span>`:'')
           +(t.status==='doing'?`<span class="progress" style="width:${prog}%"></span>`:'');
         attachBlock(el, t, true);
       } else {
-        el.innerHTML=`<div class="bn">↪ ${esc(t.name)} (continúa)</div>`;
+        el.innerHTML=`<div class="block-text"><div class="bn">↪ ${esc(t.name)} (continúa)</div></div>`;
         el.addEventListener('click', ()=>openTask(t));
       }
     }
@@ -606,8 +617,10 @@ function renderPriorityBlock(c, t){
 
       const scopeWeeks = +(dayDiff(interval.e, interval.s) / 7).toFixed(1);
       el.title = `⚡ PRIORITARIA: ${t.name}\nDueño: ${t.owner||'—'}\nInicio: ${iso(interval.s)} · ${scopeWeeks} sem\nDominio: ${d.name}`;
-      el.innerHTML = `<div class="bn">⚡ ${esc(t.name)} <span class="badge">PRIORITARIA</span></div>
-        <div class="bo">${esc(t.owner||'—')} · ${scopeWeeks}s · ${esc(d.name)}</div>`;
+      el.innerHTML = `<div class="block-text">`
+        + `<div class="bn">⚡ ${esc(t.name)} <span class="badge">PRIORITARIA</span></div>`
+        + `<div class="bo">${esc(t.owner||'—')} · ${scopeWeeks}s · ${esc(d.name)}</div>`
+        + `</div>`;
       attachBlock(el, t, true);
       c.appendChild(el);
     });
@@ -1161,5 +1174,30 @@ function parseCSV(text) {
 }
 
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function adjustBlockTexts(){
+  const board = $('#board');
+  if (!board) return;
+  const scrollLeft = board.scrollLeft;
+  const visibleStart = scrollLeft + 160; // 160px is the rail width
+  
+  document.querySelectorAll('.block .block-text').forEach(bt => {
+    const el = bt.parentElement;
+    if (!el) return;
+    const blockLeft = parseFloat(el.style.left) || 0;
+    const blockWidth = parseFloat(el.style.width) || 0;
+    
+    if (blockLeft < visibleStart && blockLeft + blockWidth > visibleStart) {
+      const offset = visibleStart - blockLeft;
+      // Leave at least 60px of space on the right for padding and tags
+      const maxOffset = Math.max(0, blockWidth - 60);
+      bt.style.transform = `translateX(${Math.min(offset, maxOffset)}px)`;
+    } else {
+      bt.style.transform = '';
+    }
+  });
+}
+
+$('#board').addEventListener('scroll', adjustBlockTexts);
 
 loadAll();

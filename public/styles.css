@@ -84,6 +84,7 @@ table.summary-table tbody tr:hover{background:var(--panel2)}
 /* Blocks */
 .block{position:absolute;border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;overflow:hidden;cursor:grab;box-shadow:0 2px 6px rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.18);user-select:none}
 .block:active{cursor:grabbing}
+.block-text{width:100%}
 .block .bn{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .block .bo{font-size:10px;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .block.ended{opacity:.6;background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.10) 0 6px,transparent 6px 12px)}
