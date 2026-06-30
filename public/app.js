@@ -109,14 +109,23 @@ function priorityFullDays(t){
 // Cada ventana lleva el conjunto de dominios (horizontales) que la roja afecta:
 // su propio dominio + los dominios de sus subtareas. Solo esas filas se cortan.
 function priorityWindows(){
-  return state.tasks.filter(t=>t.is_priority && t.status!=='ended' && t.start_date)
-    .map(t=>{
-      const s=new Date(t.start_date);
-      const domains=new Set([t.domain_id]);
-      for(const sub of (t.subtasks||[])) if(sub.domain_id) domains.add(sub.domain_id);
-      return {s, e:addDays(s, priorityFullDays(t)), domains};
-    })
-    .sort((a,b)=>a.s-b.s);
+  const list = [];
+  for (const t of state.tasks) {
+    if (!t.is_priority || t.status === 'ended' || !t.start_date) continue;
+    if (t.domain_id) {
+      const s = new Date(t.start_date);
+      const e = addDays(s, Math.ceil(Number(t.scope_weeks)*7));
+      list.push({ s, e, domains: new Set([t.domain_id]) });
+    }
+    for (const sub of (t.subtasks || [])) {
+      if (sub.domain_id) {
+        const s = addDays(new Date(t.start_date), Math.round(Number(sub.offset_weeks)*7));
+        const e = addDays(s, Math.ceil(Number(sub.scope_weeks)*7));
+        list.push({ s, e, domains: new Set([sub.domain_id]) });
+      }
+    }
+  }
+  return list.sort((a,b) => a.s - b.s);
 }
 // Divide [start, start+durNum] saltando las ventanas prioritarias -> segmentos
 function segmentize(start, durNum, windows){
@@ -154,16 +163,43 @@ function renderBacklog(){
 // =================== BOARD GEOMETRY ===================
 function computeGeom(){
   WINDOWS = priorityWindows();
-  // filas de PROYECTOS por dominio
+
+  // --- Greedy lane packing for TASKS within each domain ---
+  // Group non-backlog tasks by domain, sort by start_date, then pack greedily
+  const tasksByDomain = {};
+  const computedLanes = {}; // taskId -> computed lane
+  for(const t of state.tasks){
+    if(t.status==='backlog'||!t.domain_id||!t.start_date) continue;
+    if(t.is_priority) continue; // priority tasks are rendered differently
+    (tasksByDomain[t.domain_id] = tasksByDomain[t.domain_id] || []).push(t);
+  }
   const projRows = {};
   for(const d of state.domains) projRows[d.id]=1;
-  for(const t of state.tasks){
-    if(t.status==='backlog'||!t.domain_id) continue;
-    projRows[t.domain_id]=Math.max(projRows[t.domain_id]||1, (t.lane||0)+1);
+  for(const domId of Object.keys(tasksByDomain)){
+    const tasks = tasksByDomain[domId];
+    tasks.sort((a,b) => new Date(a.start_date) - new Date(b.start_date));
+    const laneEndsForDom = []; // each entry is the end-date of the last task placed in that lane
+    for(const t of tasks){
+      const tStart = new Date(t.start_date);
+      const tEnd = addDays(tStart, Math.ceil(Number(t.scope_weeks)*7));
+      let placed = false;
+      for(let i=0; i<laneEndsForDom.length; i++){
+        if(tStart >= laneEndsForDom[i]){
+          laneEndsForDom[i] = tEnd;
+          computedLanes[t.id] = i;
+          placed = true;
+          break;
+        }
+      }
+      if(!placed){
+        computedLanes[t.id] = laneEndsForDom.length;
+        laneEndsForDom.push(tEnd);
+      }
+    }
+    projRows[domId] = Math.max(1, laneEndsForDom.length);
   }
+
   // Empaquetar SUBRUTINAS en filas dedicadas DEBAJO de los proyectos, sin montarse.
-  // Se asigna sub-fila por empaque voraz: subrutinas que no se solapan en tiempo
-  // comparten fila; las que se solapan bajan una fila más.
   const subItems=[];
   for(const t of state.tasks){
     if(t.is_priority||t.status==='backlog'||!t.domain_id||!t.start_date) continue;
@@ -188,12 +224,16 @@ function computeGeom(){
   for(const d of state.domains) subRows[d.id]=(laneEnds[d.id]||[]).length;
 
   let y=0; const bandTop={}, bandH={};
-  for(const d of state.domains){
+  const GAP = 16;
+  for(let i=0; i<state.domains.length; i++){
+    const d=state.domains[i];
     const r=(projRows[d.id]||1)+(subRows[d.id]||0);
     const h=r*ROW_H + 16;
-    bandTop[d.id]=y; bandH[d.id]=h; y+=h;
+    bandTop[d.id]=y; bandH[d.id]=h;
+    y += h;
+    if(i < state.domains.length - 1) y += GAP;
   }
-  state.geom = { rows:projRows, projRows, subRows, subLanes, bandTop, bandH, totalH:y };
+  state.geom = { rows:projRows, projRows, subRows, subLanes, computedLanes, bandTop, bandH, totalH:y };
 }
 
 function renderBoard(){
@@ -264,6 +304,9 @@ function renderRail(){
     it.className='rail-item';
     it.style.top=state.geom.bandTop[d.id]+'px';
     it.style.height=state.geom.bandH[d.id]+'px';
+    const col=d.color||'#64748b';
+    it.style.setProperty('--rail-color', col);
+    it.style.background=`linear-gradient(90deg, ${col}1a 0%, transparent 100%)`;
     it.innerHTML=`<span class="rail-dot" style="background:${d.color}"></span>${esc(d.name)}`;
     it.title='Clic para gestionar dominios';
     it.onclick=openDomains;
@@ -274,13 +317,20 @@ function renderRail(){
 function renderCanvas(canvasW){
   const c = $('#canvas'); c.innerHTML='';
   WINDOWS = priorityWindows();
-  // bandas
-  for(const d of state.domains){
+  // bandas — each domain gets a tinted background based on its color
+  for(let di=0; di<state.domains.length; di++){
+    const d=state.domains[di];
     const b=document.createElement('div');
     b.className='lane-band';
     b.style.top=state.geom.bandTop[d.id]+'px';
     b.style.height=state.geom.bandH[d.id]+'px';
     b.dataset.domain=d.id;
+    const col=d.color||'#64748b';
+    b.style.setProperty('--band-color', col);
+    const alpha = di % 2 === 0 ? 0.07 : 0.12;
+    const hexA = Math.round(alpha*255).toString(16).padStart(2,'0');
+    const hexA2 = Math.round(alpha*0.3*255).toString(16).padStart(2,'0');
+    b.style.background=`linear-gradient(90deg, ${col}${hexA} 0%, ${col}${hexA2} 100%)`;
     c.appendChild(b);
   }
   // bandas de fin de semana (sábado y domingo) — solo en escalas finas
@@ -363,9 +413,12 @@ function renderCanvas(canvasW){
 
   // bloques
   for(const t of state.tasks){
-    if(t.status==='backlog'||!t.domain_id) continue;
+    if(t.status==='backlog') continue;
     if(t.is_priority) renderPriorityBlock(c, t);
-    else renderTaskBlock(c, t);
+    else {
+      if(!t.domain_id) continue;
+      renderTaskBlock(c, t);
+    }
   }
 }
 
@@ -420,7 +473,8 @@ function drawSegments(c, t, baseStart, durNum, top, opts){
 }
 
 function renderTaskBlock(c, t){
-  const top=state.geom.bandTop[t.domain_id]+ (t.lane||0)*ROW_H + 8;
+  const packedLane = state.geom.computedLanes[t.id] !== undefined ? state.geom.computedLanes[t.id] : (t.lane||0);
+  const top=state.geom.bandTop[t.domain_id]+ packedLane*ROW_H + 8;
   const durNum=Math.ceil(Number(t.scope_weeks)*7);
   drawSegments(c, t, new Date(t.start_date), durNum, top, {sub:false, domain:t.domain_id});
 
@@ -445,46 +499,57 @@ function renderTaskBlock(c, t){
 }
 
 // Tarea prioritaria: se dibuja SOLO sobre las horizontales que afecta
-// (su dominio + los de sus subtareas). Los dominios NO afectados que queden
-// en medio permanecen visibles (no se tapan ni se cortan). Dominios afectados
-// contiguos se fusionan en un solo bloque para que se vea como una sola pieza.
+// con la duración y offset correspondientes a ese dominio específico.
 function renderPriorityBlock(c, t){
-  const doms=new Set([t.domain_id]);
-  let maxEndDays = Math.ceil(Number(t.scope_weeks)*7);
-  for(const s of (t.subtasks||[])){
-    if(s.domain_id) doms.add(s.domain_id);
-    maxEndDays=Math.max(maxEndDays, Math.round(Number(s.offset_weeks)*7)+Math.ceil(Number(s.scope_weeks)*7));
-  }
-  const order=state.domains.map(d=>d.id);
-  const idxs=[...doms].map(id=>order.indexOf(id)).filter(i=>i>=0).sort((a,b)=>a-b);
-  // agrupar dominios afectados que sean contiguos en el orden de swimlanes
-  const groups=[]; let g=null;
-  for(const i of idxs){ if(g && i===g[g.length-1]+1) g.push(i); else { g=[i]; groups.push(g); } }
-
-  const left=px(t.start_date);
-  const width=Math.max(34, maxEndDays*ZOOMS[state.zoom].pxDay);
-  const domNames=[...doms].map(id=>state.domains.find(d=>d.id===id)?.name).filter(Boolean).join(', ');
-
-  groups.forEach((grp,gi)=>{
-    const topId=order[grp[0]], botId=order[grp[grp.length-1]];
-    const top=state.geom.bandTop[topId];
-    const bottom=state.geom.bandTop[botId]+state.geom.bandH[botId];
-    const el=document.createElement('div');
-    el.className='block priority '+t.status;
-    el.style.left=left+'px'; el.style.width=width+'px';
-    el.style.top=(top+6)+'px'; el.style.height=(bottom-top-12)+'px';
-    el.style.background='linear-gradient(135deg,#ef4444,#b91c1c)';
-    el.dataset.id=t.id;
-    el.title=`⚡ PRIORITARIA: ${t.name}\nDueño: ${t.owner||'—'}\nInicio: ${iso(t.start_date)} · ${t.scope_weeks} sem\nAfecta: ${domNames}`;
-    if(gi===0){
-      el.innerHTML=`<div class="bn">⚡ ${esc(t.name)} <span class="badge">PRIORITARIA</span></div>
-        <div class="bo">${esc(t.owner||'—')} · ${t.scope_weeks}s · ${esc(domNames)}</div>`;
-      attachBlock(el, t, true);
-    } else {
-      el.addEventListener('click', ()=>openTask(t));
+  for (const d of state.domains) {
+    const intervals = [];
+    if (t.domain_id === d.id) {
+      const s = new Date(t.start_date);
+      intervals.push({ s, e: addDays(s, Math.ceil(Number(t.scope_weeks)*7)) });
     }
-    c.appendChild(el);
-  });
+    for (const sub of (t.subtasks || [])) {
+      if (sub.domain_id === d.id) {
+        const s = addDays(new Date(t.start_date), Math.round(Number(sub.offset_weeks)*7));
+        intervals.push({ s, e: addDays(s, Math.ceil(Number(sub.scope_weeks)*7)) });
+      }
+    }
+    if (intervals.length === 0) continue;
+
+    intervals.sort((a,b) => a.s - b.s);
+    const merged = [];
+    for (const item of intervals) {
+      if (merged.length === 0) {
+        merged.push(item);
+      } else {
+        const last = merged[merged.length - 1];
+        if (item.s <= last.e) {
+          last.e = new Date(Math.max(last.e, item.e));
+        } else {
+          merged.push(item);
+        }
+      }
+    }
+
+    merged.forEach((interval) => {
+      const left = px(interval.s);
+      const width = Math.max(34, dayDiff(interval.e, interval.s) * ZOOMS[state.zoom].pxDay);
+      const top = state.geom.bandTop[d.id];
+      const bottom = top + state.geom.bandH[d.id];
+      const el = document.createElement('div');
+      el.className = 'block priority ' + t.status;
+      el.style.left = left + 'px'; el.style.width = width + 'px';
+      el.style.top = (top + 6) + 'px'; el.style.height = (bottom - top - 12) + 'px';
+      el.style.background = 'linear-gradient(135deg,#ef4444,#b91c1c)';
+      el.dataset.id = t.id;
+
+      const scopeWeeks = +(dayDiff(interval.e, interval.s) / 7).toFixed(1);
+      el.title = `⚡ PRIORITARIA: ${t.name}\nDueño: ${t.owner||'—'}\nInicio: ${iso(interval.s)} · ${scopeWeeks} sem\nDominio: ${d.name}`;
+      el.innerHTML = `<div class="bn">⚡ ${esc(t.name)} <span class="badge">PRIORITARIA</span></div>
+        <div class="bo">${esc(t.owner||'—')} · ${scopeWeeks}s · ${esc(d.name)}</div>`;
+      attachBlock(el, t, true);
+      c.appendChild(el);
+    });
+  }
 }
 
 // =================== DRAG & EDIT en bloques ===================
@@ -505,25 +570,34 @@ function attachBlock(el, t, allowDrag){
   el.addEventListener('pointerup', async (e)=>{
     if(!dragging) return; dragging=false;
     if(!moved){ openTask(t); return; }
-    // nueva fecha
-    const newLeft=parseFloat(el.style.left);
-    const newDays=Math.round(newLeft/ZOOMS[state.zoom].pxDay);
-    const newStart=iso(addDays(state.viewStart, newDays));
-    const patch={ start_date:newStart };
-    if(!t.is_priority){
+    
+    let patch;
+    if (t.is_priority) {
+      const shiftDays = Math.round((parseFloat(el.style.left) - startLeft) / ZOOMS[state.zoom].pxDay);
+      const newStart = iso(addDays(new Date(t.start_date), shiftDays));
+      patch = { start_date: newStart };
+    } else {
+      const newLeft=parseFloat(el.style.left);
+      const newDays=Math.round(newLeft/ZOOMS[state.zoom].pxDay);
+      const newStart=iso(addDays(state.viewStart, newDays));
+      patch={ start_date:newStart };
       const newTop=parseFloat(el.style.top);
-      const {domain,lane}=domLaneFromY(newTop);
-      if(domain){ patch.domain_id=domain; patch.lane=lane; }
+      const {domain}=domLaneFromY(newTop);
+      if(domain){ patch.domain_id=domain; patch.lane=0; }
     }
     await api.send('/api/tasks/'+t.id,'PUT',patch);
     await loadAll();
   });
 }
 function domLaneFromY(y){
+  const GAP = 16;
   for(const d of state.domains){
     const top=state.geom.bandTop[d.id], h=state.geom.bandH[d.id];
-    if(y>=top && y<top+h){
-      const lane=Math.max(0, Math.round((y-top-8)/ROW_H));
+    if(y>=top && y<top+h + GAP){
+      const lane=Math.min(
+        Math.max(0, Math.round((y-top-8)/ROW_H)),
+        (state.geom.projRows[d.id]||1) + (state.geom.subRows[d.id]||0) - 1
+      );
       return {domain:d.id, lane};
     }
   }
@@ -555,9 +629,11 @@ $('#canvas').addEventListener('drop', async (e)=>{
   const x=e.clientX-rect.left, y=e.clientY-rect.top;
   const days=Math.round(x/ZOOMS[state.zoom].pxDay);
   const start=iso(addDays(state.viewStart, days));
-  const {domain,lane}=domLaneFromY(y);
-  const patch={ status:'doing', start_date:start, baseline_start:start, lane };
-  if(domain) patch.domain_id=domain;
+  const {domain}=domLaneFromY(y);
+  const patch={ status:'doing', start_date:start, baseline_start:start, lane:0 };
+  const task = state.tasks.find(x => String(x.id) === id);
+  if(domain && !(task && task.is_priority)) patch.domain_id=domain;
+  else if(task && task.is_priority) patch.domain_id=null;
   await api.send('/api/tasks/'+id,'PUT',patch);
   await loadAll();
 });
@@ -584,6 +660,7 @@ function openNew(priority){
   $('#f_scope').value=priority?1:2; $('#f_start').value=iso(today());
   $('#f_status').value=priority?'doing':'backlog';
   fillDomains($('#f_domain'), state.domains[0]?.id);
+  $('#f_domain_wrap').style.display= priority?'none':'';
   $('#colorRow').style.display= priority?'none':'flex';
   if(!priority) colorRow(PALETTE[0]); else $('#colorRow').dataset.color=RED;
   $('#subsList').innerHTML=''; $('#btnDelete').hidden=true;
@@ -597,6 +674,7 @@ function openTask(t){
   $('#f_scope').value=t.scope_weeks; $('#f_start').value=t.start_date?iso(t.start_date):iso(today());
   $('#f_status').value=t.status;
   fillDomains($('#f_domain'), t.domain_id);
+  $('#f_domain_wrap').style.display= t.is_priority?'none':'';
   $('#colorRow').style.display= t.is_priority?'none':'flex';
   if(!t.is_priority) colorRow(t.color); else $('#colorRow').dataset.color=RED;
   $('#subsList').innerHTML=''; (t.subtasks||[]).forEach(s=>addSubRow(s));
@@ -622,7 +700,7 @@ $('#taskForm').addEventListener('submit', async (e)=>{
   const priority=$('#f_priority').value==='true';
   const body={
     name:$('#f_name').value.trim(), owner:$('#f_owner').value.trim(),
-    description:$('#f_desc').value.trim(), domain_id:+$('#f_domain').value,
+    description:$('#f_desc').value.trim(), domain_id: priority ? null : +$('#f_domain').value,
     status:$('#f_status').value, scope_weeks:+$('#f_scope').value,
     start_date:$('#f_start').value, is_priority:priority,
     color: priority?RED:($('#colorRow').dataset.color||null),

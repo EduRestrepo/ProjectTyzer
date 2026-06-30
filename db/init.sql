@@ -118,11 +118,10 @@ VALUES
   ((SELECT id FROM t), (SELECT id FROM ds), 'Cifrado de señalización', 1, 2);
 
 -- Una tarea prioritaria (roja) de ejemplo, en bloque, con subtarea en otro dominio
-WITH dom AS (SELECT id FROM domains WHERE name='Seguridad' LIMIT 1)
 INSERT INTO tasks (name, owner, description, domain_id, status, color, is_priority, scope_weeks, baseline_start, start_date, lane)
 VALUES
   ('Incidente: brecha crítica', 'CISO', 'Respuesta a incidente prioritario - todo el equipo',
-   (SELECT id FROM dom), 'doing', '#ef4444', TRUE, 2,
+   NULL, 'doing', '#ef4444', TRUE, 2,
    CURRENT_DATE, CURRENT_DATE, 2);
 
 WITH t AS (SELECT id FROM tasks WHERE name='Incidente: brecha crítica' LIMIT 1),

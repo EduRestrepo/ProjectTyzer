@@ -231,19 +231,37 @@ async function recomputeSchedule(db) {
   // Cada ventana afecta SOLO a las horizontales (dominios) que la roja toca:
   // su propio dominio + los dominios de sus subtareas.
   const { rows: pris } = await db.query(
-    `SELECT t.domain_id, t.start_date, t.scope_weeks,
-            COALESCE(MAX(s.offset_weeks + s.scope_weeks), 0) AS sub_ext,
-            ARRAY_REMOVE(ARRAY_AGG(DISTINCT s.domain_id), NULL) AS sub_domains
-       FROM tasks t LEFT JOIN subtasks s ON s.parent_task_id = t.id
-      WHERE t.is_priority = TRUE AND t.status <> 'ended' AND t.start_date IS NOT NULL
-      GROUP BY t.id, t.domain_id, t.start_date, t.scope_weeks
-      ORDER BY t.start_date ASC`
+    `SELECT id, domain_id, start_date, scope_weeks FROM tasks
+      WHERE is_priority = TRUE AND status <> 'ended' AND start_date IS NOT NULL`
   );
-  const windows = pris.map((p) => {
-    const s = new Date(p.start_date);
-    const domains = new Set([p.domain_id, ...(p.sub_domains || [])]);
-    return { s, e: addDays(s, durDays(Math.max(Number(p.scope_weeks), Number(p.sub_ext)))), domains };
-  }).sort((a, b) => a.s - b.s);
+  const { rows: subs } = await db.query(
+    `SELECT s.parent_task_id, s.domain_id, s.offset_weeks, s.scope_weeks
+       FROM subtasks s JOIN tasks t ON s.parent_task_id = t.id
+      WHERE t.is_priority = TRUE AND t.status <> 'ended' AND t.start_date IS NOT NULL AND s.domain_id IS NOT NULL`
+  );
+
+  const subsByParent = {};
+  for (const s of subs) {
+    subsByParent[s.parent_task_id] = subsByParent[s.parent_task_id] || [];
+    subsByParent[s.parent_task_id].push(s);
+  }
+
+  const windows = [];
+  for (const p of pris) {
+    const parentStart = new Date(p.start_date);
+    if (p.domain_id) {
+      const s = new Date(parentStart);
+      const e = addDays(s, durDays(p.scope_weeks));
+      windows.push({ s, e, domains: new Set([p.domain_id]) });
+    }
+    const pSubs = subsByParent[p.id] || [];
+    for (const sub of pSubs) {
+      const s = addDays(parentStart, Math.round(Number(sub.offset_weeks) * 7));
+      const e = addDays(s, durDays(sub.scope_weeks));
+      windows.push({ s, e, domains: new Set([sub.domain_id]) });
+    }
+  }
+  windows.sort((a, b) => a.s - b.s);
 
   const { rows: tasks } = await db.query(
     `SELECT id, domain_id, planned_start, scope_weeks FROM tasks
@@ -484,6 +502,7 @@ async function ensureSchema() {
   await pool.query(
     'UPDATE tasks SET planned_start = start_date WHERE planned_start IS NULL AND start_date IS NOT NULL'
   );
+  await pool.query('UPDATE tasks SET domain_id = NULL WHERE is_priority = TRUE');
   await recomputeSchedule(pool);
 }
 
