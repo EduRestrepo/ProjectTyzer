@@ -15,7 +15,7 @@ const RED = '#ef4444';
 const ROW_H = 56;
 const DAY_MS = 86400000;
 
-const state = { domains: [], tasks: [], zoom: 'week', viewStart: null, geom: {} };
+const state = { domains: [], tasks: [], zoom: 'week', viewStart: null, geom: {}, boardFilter: { doing: true, ended: true } };
 
 const $ = (s) => document.querySelector(s);
 const api = {
@@ -171,6 +171,7 @@ function computeGeom(){
   for(const t of state.tasks){
     if(t.status==='backlog'||!t.domain_id||!t.start_date) continue;
     if(t.is_priority) continue; // priority tasks are rendered differently
+    if(!state.boardFilter[t.status]) continue;
     (tasksByDomain[t.domain_id] = tasksByDomain[t.domain_id] || []).push(t);
   }
   const projRows = {};
@@ -203,6 +204,7 @@ function computeGeom(){
   const subItems=[];
   for(const t of state.tasks){
     if(t.is_priority||t.status==='backlog'||!t.domain_id||!t.start_date) continue;
+    if(!state.boardFilter[t.status]) continue;
     for(const s of (t.subtasks||[])){
       if(!s.domain_id) continue;
       const start=addDays(new Date(t.start_date), Math.round(Number(s.offset_weeks)*7));
@@ -414,9 +416,12 @@ function renderCanvas(canvasW){
   // bloques
   for(const t of state.tasks){
     if(t.status==='backlog') continue;
-    if(t.is_priority) renderPriorityBlock(c, t);
-    else {
+    if(t.is_priority) {
+      if(!state.boardFilter[t.status]) continue;
+      renderPriorityBlock(c, t);
+    } else {
       if(!t.domain_id) continue;
+      if(!state.boardFilter[t.status]) continue;
       renderTaskBlock(c, t);
     }
   }
@@ -741,6 +746,16 @@ $('#btnPriority').onclick=()=>openNew(true);
 // =================== ZOOM ===================
 document.querySelectorAll('.zoom button').forEach(b=>{
   b.onclick=()=>{ document.querySelectorAll('.zoom button').forEach(x=>x.classList.remove('active')); b.classList.add('active'); state.zoom=b.dataset.zoom; renderBoard(); };
+});
+
+// =================== FILTROS TABLERO ===================
+document.querySelectorAll('#boardFilters button').forEach(b=>{
+  b.onclick=()=>{
+    const status=b.dataset.status;
+    state.boardFilter[status]=!state.boardFilter[status];
+    b.classList.toggle('active', state.boardFilter[status]);
+    renderBoard();
+  };
 });
 
 // =================== REPORTERIA ===================

@@ -13,6 +13,9 @@ body{margin:0;font-family:system-ui,Segoe UI,Roboto,sans-serif;background:var(--
 .zoom-label{color:var(--muted);font-size:12px;margin-right:4px}
 .zoom button{background:var(--panel2);color:var(--txt);border:1px solid var(--line);padding:5px 10px;border-radius:6px;cursor:pointer;font-size:13px}
 .zoom button.active{background:var(--primary);border-color:var(--primary)}
+.board-filters{display:flex;align-items:center;gap:4px}
+.board-filters button{background:var(--panel2);color:var(--txt);border:1px solid var(--line);padding:5px 10px;border-radius:6px;cursor:pointer;font-size:13px}
+.board-filters button.active{background:var(--primary);border-color:var(--primary)}
 .actions{margin-left:auto;display:flex;gap:8px}
 .btn{background:var(--panel2);color:var(--txt);border:1px solid var(--line);padding:7px 12px;border-radius:7px;cursor:pointer;font-size:13px}
 .btn:hover{filter:brightness(1.15)}
